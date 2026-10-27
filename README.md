@@ -1,8 +1,6 @@
-<!-- TODO: add the icon at assets/brand/pigeon-icon.png (dark rounded tile, glowing pigeon silhouette carrying a message roll), then uncomment:
 <p align="center">
   <img src="assets/brand/pigeon-icon.png" alt="Postal Pigeon" width="160">
 </p>
--->
 
 <h1 align="center">Postal Pigeon</h1>
 
