@@ -1,0 +1,15 @@
+{
+  "name": "Postal Pigeon",
+  "short_name": "Pigeon",
+  "description": "The push relay for self-hosted Hedgerow servers. In development: not public yet.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "browser",
+  "background_color": "#0b0b0d",
+  "theme_color": "#0b0b0d",
+  "icons": [
+    { "src": "favicon.png", "type": "image/png", "sizes": "48x48" },
+    { "src": "apple-touch-icon.png", "type": "image/png", "sizes": "180x180" },
+    { "src": "icon-512.png", "type": "image/png", "sizes": "512x512" }
+  ]
+}

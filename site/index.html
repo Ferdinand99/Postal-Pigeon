@@ -1,0 +1,711 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'sha256-WZRJfWvsnNCPcxzZwvyhovnZGqhZaC+8gPGPRbx6wTk='; style-src 'self'; img-src 'self'; font-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'none'"
+    />
+    <title>Postal Pigeon — the push relay for self-hosted Hedgerow servers (in development)</title>
+    <meta
+      name="description"
+      content="Postal Pigeon is a small open source service that lets self-hosted Hedgerow servers send push notifications to the Hedgerow iOS apps. It is a content-free doorbell: it never learns what happened. In development, not public yet."
+    />
+    <script>document.documentElement.classList.add("js");</script>
+    <link rel="canonical" href="https://hedgerow.tools/Postal-Pigeon/" />
+    <link rel="icon" href="favicon.png" type="image/png" sizes="48x48" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#0b0b0d" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://hedgerow.tools/Postal-Pigeon/" />
+    <meta property="og:site_name" content="Postal Pigeon" />
+    <meta property="og:title" content="Postal Pigeon — the push relay for self-hosted Hedgerow servers" />
+    <meta
+      property="og:description"
+      content="A content-free doorbell: your own server asks Pigeon to ring your iPhone, and Pigeon never learns what happened. Open source, from the Hedgerow family. In development, not public yet."
+    />
+    <meta property="og:image" content="https://hedgerow.tools/Postal-Pigeon/assets/pigeon-icon.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1024" />
+    <meta property="og:image:height" content="1024" />
+    <meta property="og:image:alt" content="The Postal Pigeon logo, a light blue pigeon carrying a message on a dark tile." />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Postal Pigeon — the push relay for self-hosted Hedgerow servers" />
+    <meta
+      name="twitter:description"
+      content="A content-free doorbell: your own server asks Pigeon to ring your iPhone, and Pigeon never learns what happened. Open source, from the Hedgerow family. In development, not public yet."
+    />
+    <meta name="twitter:image" content="https://hedgerow.tools/Postal-Pigeon/assets/pigeon-icon.png" />
+    <link rel="preload" href="fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Postal Pigeon",
+        "description": "A small open source push relay that lets self-hosted Hedgerow servers send content-free push notifications to the Hedgerow iOS apps. In development; not public yet.",
+        "url": "https://hedgerow.tools/Postal-Pigeon/",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Docker (planned)",
+        "image": "https://hedgerow.tools/Postal-Pigeon/icon-512.png",
+        "license": "https://github.com/Ferdinand99/Postal-Pigeon/blob/main/LICENSE",
+        "sameAs": ["https://github.com/Ferdinand99/Postal-Pigeon"]
+      }
+    </script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <svg width="0" height="0" class="vh" aria-hidden="true" focusable="false">
+      <symbol id="gh" viewBox="0 0 16 16">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+      </symbol>
+    </svg>
+
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar" id="top">
+      <div class="wrap topbar-inner">
+        <a class="brand" href="#top">
+          <img src="favicon.png" alt="" width="28" height="28" />
+          <span>Postal Pigeon</span>
+        </a>
+
+        <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="topnav" hidden>
+          <span></span><span></span>
+        </button>
+
+        <nav class="topnav" id="topnav" aria-label="Main">
+          <a class="topnav-link" href="#why">Why</a>
+          <a class="topnav-link" href="#how">How it works</a>
+          <a class="topnav-link" href="#privacy">Privacy</a>
+          <a class="topnav-link" href="#limits">Limits</a>
+          <a class="topnav-link" href="#developers">Developers</a>
+          <a class="topnav-link" href="#status">Status</a>
+          <a class="topnav-link" href="#faq">FAQ</a>
+          <a class="btn btn-ghost btn-sm" href="https://github.com/Ferdinand99/Postal-Pigeon" aria-label="Follow Postal Pigeon on GitHub">
+            <svg class="gh-mark" aria-hidden="true"><use href="#gh"></use></svg>
+            <span>Follow on GitHub</span>
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- Hero ============================================================ -->
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="wrap">
+          <div class="hero-copy">
+            <div class="hero-icon">
+              <img src="icon-512.png" width="96" height="96" alt="" />
+            </div>
+            <a class="live-pill" href="#status">
+              <span class="dot" aria-hidden="true"></span>
+              <span>In development</span>
+              <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#chevron-right"></use></svg>
+            </a>
+            <h1 class="display" id="hero-title">A doorbell for<br class="br-wide" /> your own server.</h1>
+            <p class="lead">
+              Postal Pigeon is a small service that lets self-hosted Hedgerow servers send push
+              notifications to the Hedgerow iOS apps. It rings the bell on your iPhone, and it never
+              learns what the ring is about.
+            </p>
+            <p class="hero-fine">Not public yet. Push is optional, and the apps work without it.</p>
+            <div class="hero-actions">
+              <a class="btn btn-primary btn-lg" href="https://github.com/Ferdinand99/Postal-Pigeon">
+                <svg class="gh-mark" aria-hidden="true"><use href="#gh"></use></svg>
+                <span>Follow on GitHub</span>
+              </a>
+              <a class="btn btn-ghost btn-lg" href="#how">
+                <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#send"></use></svg>
+                <span>See how it works</span>
+              </a>
+            </div>
+            <p class="hero-meta"><span>Open source, AGPL-3.0</span><span>Built in Rust</span><span>Part of Hedgerow</span></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Why ============================================================= -->
+      <section class="section" id="why" aria-labelledby="why-title">
+        <div class="wrap">
+          <header class="section-head reveal">
+            <p class="eyebrow">Why Pigeon</p>
+            <h2 class="headline" id="why-title">Only one key can ring an iPhone app.</h2>
+            <p class="sub">
+              Apple only lets the holder of an app’s push key send notifications to that app. The
+              Hedgerow iOS apps talk to servers that you host yourself, and those servers can’t hold the
+              publisher’s key, because anyone who runs a server would then hold it too.
+            </p>
+          </header>
+
+          <ul class="grid">
+            <li class="card feature problem reveal">
+              <span class="list-icon status-accent"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#key"></use></svg></span>
+              <h3>Apple’s rule</h3>
+              <p>Push notifications for an iOS app can only be sent by whoever holds that app’s <strong>Apple push key</strong>. Nobody else can ring it.</p>
+            </li>
+            <li class="card feature problem reveal d1">
+              <span class="list-icon status-info"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#server"></use></svg></span>
+              <h3>Your server can’t hold it</h3>
+              <p>Hedgerow servers are run by many different people. Handing every one of them the publisher’s key would be the end of keeping it safe.</p>
+            </li>
+            <li class="card feature problem reveal d2">
+              <span class="list-icon status-none"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#bell"></use></svg></span>
+              <h3>So Pigeon rings for it</h3>
+              <p>Your server asks Pigeon to wake up one specific app install. Pigeon holds the key and asks Apple to do it. That is the whole job.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- How it works ==================================================== -->
+      <section class="section section-alt" id="how" aria-labelledby="how-title">
+        <div class="wrap">
+          <header class="section-head reveal">
+            <p class="eyebrow">How it works</p>
+            <h2 class="headline" id="how-title">A doorbell, not a messenger.</h2>
+            <p class="sub">
+              The push says only “something changed, ask your server”. What changed is never put in the
+              push. The app asks your own server, and your server tells it.
+            </p>
+          </header>
+
+          <figure class="flow reveal">
+            <svg class="flow-svg flow-wide" viewBox="0 0 900 340" role="img" aria-labelledby="flow-wide-title flow-wide-desc">
+              <title id="flow-wide-title">How a push travels</title>
+              <desc id="flow-wide-desc">Step 1: your server asks Postal Pigeon to send a push. Step 2: Postal Pigeon passes it to Apple. Step 3: Apple delivers it to the Hedgerow app on your iPhone. Dashed lines: the app registered its device with Postal Pigeon once and gave a handle to your server, and after a push it asks your server what changed.</desc>
+              <defs>
+                <marker id="arr-w" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                  <path class="flow-head" d="M1 1.5L8.5 5L1 8.5z" />
+                </marker>
+                <marker id="arr-wd" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                  <path class="flow-head-dim" d="M1 1.5L8.5 5L1 8.5z" />
+                </marker>
+              </defs>
+
+              <rect class="flow-node" x="30" y="30" width="200" height="80" rx="16" />
+              <text class="flow-title" x="130" y="64" text-anchor="middle">Your server</text>
+              <text class="flow-sub" x="130" y="88" text-anchor="middle">self-hosted</text>
+
+              <rect class="flow-node flow-node-main" x="350" y="30" width="200" height="80" rx="16" />
+              <text class="flow-title" x="450" y="64" text-anchor="middle">Postal Pigeon</text>
+              <text class="flow-sub" x="450" y="88" text-anchor="middle">holds the push key</text>
+
+              <rect class="flow-node" x="670" y="30" width="200" height="80" rx="16" />
+              <text class="flow-title" x="770" y="64" text-anchor="middle">Apple</text>
+              <text class="flow-sub" x="770" y="88" text-anchor="middle">push service</text>
+
+              <rect class="flow-node" x="670" y="220" width="200" height="80" rx="16" />
+              <text class="flow-title" x="770" y="254" text-anchor="middle">Your iPhone</text>
+              <text class="flow-sub" x="770" y="278" text-anchor="middle">the Hedgerow app</text>
+
+              <path class="flow-line" d="M232 70H346" marker-end="url(#arr-w)" />
+              <path class="flow-line" d="M552 70H666" marker-end="url(#arr-w)" />
+              <path class="flow-line" d="M770 112V216" marker-end="url(#arr-w)" />
+
+              <circle class="flow-badge" cx="289" cy="70" r="14" />
+              <text class="flow-badge-n" x="289" y="75.5" text-anchor="middle">1</text>
+              <circle class="flow-badge" cx="609" cy="70" r="14" />
+              <text class="flow-badge-n" x="609" y="75.5" text-anchor="middle">2</text>
+              <circle class="flow-badge" cx="770" cy="164" r="14" />
+              <text class="flow-badge-n" x="770" y="169.5" text-anchor="middle">3</text>
+
+              <path class="flow-line-dim" d="M666 256H450V114" marker-end="url(#arr-wd)" />
+              <text class="flow-note" x="460" y="244">registers its device, once</text>
+              <path class="flow-line-dim" d="M666 288H130V114" marker-end="url(#arr-wd)" />
+              <text class="flow-note" x="140" y="276">hands over a handle, then fetches the details</text>
+            </svg>
+
+            <svg class="flow-svg flow-tall" viewBox="0 0 360 560" role="img" aria-labelledby="flow-tall-title flow-tall-desc">
+              <title id="flow-tall-title">How a push travels</title>
+              <desc id="flow-tall-desc">Step 1: your server asks Postal Pigeon to send a push. Step 2: Postal Pigeon passes it to Apple. Step 3: Apple delivers it to the Hedgerow app on your iPhone. Dashed lines: the app registered its device with Postal Pigeon once and gave a handle to your server, and after a push it asks your server what changed.</desc>
+              <defs>
+                <marker id="arr-t" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                  <path class="flow-head" d="M1 1.5L8.5 5L1 8.5z" />
+                </marker>
+                <marker id="arr-td" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                  <path class="flow-head-dim" d="M1 1.5L8.5 5L1 8.5z" />
+                </marker>
+              </defs>
+
+              <rect class="flow-node" x="90" y="10" width="180" height="76" rx="16" />
+              <text class="flow-title" x="180" y="43" text-anchor="middle">Your server</text>
+              <text class="flow-sub" x="180" y="66" text-anchor="middle">self-hosted</text>
+
+              <rect class="flow-node flow-node-main" x="90" y="150" width="180" height="76" rx="16" />
+              <text class="flow-title" x="180" y="183" text-anchor="middle">Postal Pigeon</text>
+              <text class="flow-sub" x="180" y="206" text-anchor="middle">holds the push key</text>
+
+              <rect class="flow-node" x="90" y="290" width="180" height="76" rx="16" />
+              <text class="flow-title" x="180" y="323" text-anchor="middle">Apple</text>
+              <text class="flow-sub" x="180" y="346" text-anchor="middle">push service</text>
+
+              <rect class="flow-node" x="90" y="430" width="180" height="76" rx="16" />
+              <text class="flow-title" x="180" y="463" text-anchor="middle">Your iPhone</text>
+              <text class="flow-sub" x="180" y="486" text-anchor="middle">the Hedgerow app</text>
+
+              <path class="flow-line" d="M180 88V146" marker-end="url(#arr-t)" />
+              <path class="flow-line" d="M180 228V286" marker-end="url(#arr-t)" />
+              <path class="flow-line" d="M180 368V426" marker-end="url(#arr-t)" />
+
+              <circle class="flow-badge" cx="180" cy="117" r="14" />
+              <text class="flow-badge-n" x="180" y="122.5" text-anchor="middle">1</text>
+              <circle class="flow-badge" cx="180" cy="257" r="14" />
+              <text class="flow-badge-n" x="180" y="262.5" text-anchor="middle">2</text>
+              <circle class="flow-badge" cx="180" cy="397" r="14" />
+              <text class="flow-badge-n" x="180" y="402.5" text-anchor="middle">3</text>
+
+              <path class="flow-line-dim" d="M88 468H36V188H86" marker-end="url(#arr-td)" />
+              <path class="flow-line-dim" d="M272 480H326V48H274" marker-end="url(#arr-td)" />
+              <text class="flow-note" x="180" y="540" text-anchor="middle">Dashed: set-up and fetching the details</text>
+            </svg>
+            <figcaption>
+              Solid lines are a push on its way. Dashed lines are the app talking to Pigeon once, to
+              register its device, and to its own server, to hand over a handle and later fetch the details.
+            </figcaption>
+          </figure>
+
+          <div class="how-cols">
+            <div class="reveal">
+              <h3 class="how-h">Once, when you connect a server</h3>
+              <ol class="how-list">
+                <li>The app gets its address from Apple and registers it with Pigeon directly. Pigeon gives it a device id and a private key that never leaves the phone.</li>
+                <li>For each of your servers, the app asks Pigeon for a <strong>handle</strong>: an opaque code that lets one server ring this phone, and nobody else.</li>
+                <li>The app gives the handle to that server over the connection it already has. Your server never learns the phone’s address, only the handle.</li>
+              </ol>
+            </div>
+            <div class="reveal d1">
+              <h3 class="how-h">Each time something happens</h3>
+              <ol class="how-list">
+                <li>Your server asks Pigeon to send a push to a handle, naming only the kind of push and an opaque reference.</li>
+                <li>Pigeon builds the push itself, with fixed generic text, and hands it to Apple.</li>
+                <li>The app wakes up and asks <strong>its own server</strong> what changed. The details appear on your phone, written there, and never pass through Pigeon or Apple.</li>
+              </ol>
+            </div>
+          </div>
+
+          <p class="later reveal">
+            <strong>Fixed text, filled in on your phone.</strong> If the app can’t reach your server in
+            time, the notification keeps its generic wording, such as “Something needs attention”. You
+            still get the ring. Servers can’t make Pigeon display text of their choosing, so it can’t be
+            used to put words in the app’s mouth.
+          </p>
+        </div>
+      </section>
+
+      <!-- Privacy ========================================================= -->
+      <section class="section" id="privacy" aria-labelledby="privacy-title">
+        <div class="wrap">
+          <header class="section-head reveal">
+            <p class="eyebrow">Privacy</p>
+            <h2 class="headline" id="privacy-title">What the operator can and can’t see.</h2>
+            <p class="sub">
+              The official Pigeon is run by the Hedgerow maintainer. This is the plain-words version of
+              what that means. The full privacy statement is in the
+              <a href="https://github.com/Ferdinand99/Postal-Pigeon/blob/main/docs/design.md#14-privacy-statement">design document</a>.
+            </p>
+          </header>
+
+          <ul class="grid grid-2">
+            <li class="card feature reveal">
+              <span class="list-icon status-accent"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#eye"></use></svg></span>
+              <h3>What the operator can see</h3>
+              <ul class="ticks">
+                <li>Your phone’s <strong>push address</strong> (Apple’s token), the app it belongs to and whether it is a test build. It doesn’t name you.</li>
+                <li><strong>When</strong> pushes are sent, how often, and the date a handle was last used.</li>
+                <li>The internet address of your phone when the app registers, and of your server when it sends, while the request is handled.</li>
+                <li>How many handles a phone has, roughly how many servers it is connected to, but not which.</li>
+                <li>Which server product and version each server reports about itself.</li>
+              </ul>
+            </li>
+            <li class="card feature reveal d1">
+              <span class="list-icon status-up"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#eye-off"></use></svg></span>
+              <h3>What the operator can’t see</h3>
+              <ul class="ticks">
+                <li><strong>What happened.</strong> There is no content in a push, so there is nothing to read.</li>
+                <li>Your server’s name or address, in any stored form. Pigeon never calls your server and holds no key to it.</li>
+                <li>Your server’s API tokens, your data, your monitors, your vault.</li>
+                <li>Your name, e-mail address or an account. There are none.</li>
+                <li>What is on your phone.</li>
+              </ul>
+            </li>
+          </ul>
+
+          <ul class="grid">
+            <li class="card feature reveal">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#clock"></use></svg></span>
+              <h3>Logs kept for 7 days</h3>
+              <p>The reverse proxy in front of Pigeon keeps access logs for at most <strong>seven days</strong>. Pigeon itself doesn’t log tokens, handles, credentials or client addresses.</p>
+            </li>
+            <li class="card feature reveal d1">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#users"></use></svg></span>
+              <h3>What Apple sees</h3>
+              <p>The device token, the app, the time and the tiny content-free message, as it does for every iOS push. Apple’s own privacy terms apply.</p>
+            </li>
+            <li class="card feature reveal d2">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#shield-check"></use></svg></span>
+              <h3>What Pigeon never does</h3>
+              <p>Sell or share data, add analytics or advertising, build profiles, call your server, or send anything but a “something changed” signal.</p>
+            </li>
+          </ul>
+
+          <div class="steps-notes">
+            <div class="callout status-info reveal">
+              <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#info"></use></svg>
+              <p>
+                <span class="callout-title">The honest limit</span>
+                While a push is being sent, the operator’s system necessarily sees which server asked for
+                which handle. Pigeon doesn’t store that pairing or write it to its logs, but a modified
+                relay could. That is why the design says “as far as practical”, not “impossible”.
+              </p>
+            </div>
+            <div class="callout status-up reveal d1">
+              <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#check-circle"></use></svg>
+              <p>
+                <span class="callout-title">You stay in control</span>
+                Push is off by default on every server. You can turn it off in the app and on the
+                server, cut off a single server from the app (Pigeon enforces it), or delete your device
+                record and Pigeon forgets it at once.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Platforms ======================================================= -->
+      <section class="section section-alt" id="platforms" aria-labelledby="platforms-title">
+        <div class="wrap">
+          <header class="section-head reveal">
+            <p class="eyebrow">Who uses it</p>
+            <h2 class="headline" id="platforms-title">iOS needs Pigeon. Android doesn’t.</h2>
+            <p class="sub">
+              Pigeon exists because of how Apple’s push service works. Elsewhere, and whenever you would
+              rather not use it, everything keeps working.
+            </p>
+          </header>
+
+          <ul class="grid grid-2">
+            <li class="card feature reveal">
+              <span class="list-icon status-accent"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#bell"></use></svg></span>
+              <h3>The Hedgerow iOS apps</h3>
+              <p>The Hedgerow app, for your own <a href="https://hedgerow.tools/Vigilant-Vole/">Vigilant Vole</a>, <a href="https://hedgerow.tools/Keen-Kestrel/">Keen Kestrel</a> and <a href="https://hedgerow.tools/Wise-Wren/">Wise Wren</a>, and later <a href="https://hedgerow.tools/Faithful-Ferret/">Faithful Ferret</a>, use Pigeon to get pushes from your servers.</p>
+            </li>
+            <li class="card feature reveal d1">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#plug"></use></svg></span>
+              <h3>Android uses UnifiedPush</h3>
+              <p>Android builds get pushes through a distributor you choose, such as ntfy, and your server talks to it directly. Pigeon isn’t involved at all.</p>
+            </li>
+            <li class="card feature reveal">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#pause"></use></svg></span>
+              <h3>Off by default</h3>
+              <p>Push is optional on every server. Without it, the apps update when you open them, when you pull to refresh, and when iOS refreshes them in the background.</p>
+            </li>
+            <li class="card feature reveal d1">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#server"></use></svg></span>
+              <h3>Run your own</h3>
+              <p>The push key belongs to the official apps. If you build your own version of an app, you run your own Pigeon with your own Apple developer account. The code is open for that reason.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- Limits ========================================================== -->
+      <section class="section" id="limits" aria-labelledby="limits-title">
+        <div class="wrap">
+          <header class="section-head reveal">
+            <p class="eyebrow">Limits and fair use</p>
+            <h2 class="headline" id="limits-title">Free to use, with sensible limits.</h2>
+            <p class="sub">
+              The official Pigeon is free, and there are no supporter tiers planned. The limits keep it
+              usable for everyone and keep Apple happy with the shared push key. These are starting
+              values and will be tuned from real use.
+            </p>
+          </header>
+
+          <ul class="grid grid-2 limits">
+            <li class="card feature reveal">
+              <h3>Per connection</h3>
+              <dl class="facts">
+                <div><dt>Notifications</dt><dd>6 an hour</dd></div>
+                <div><dt>Silent refreshes</dt><dd>30 an hour</dd></div>
+              </dl>
+              <p>One server can ring one phone at most this often.</p>
+            </li>
+            <li class="card feature reveal d1">
+              <h3>Per phone</h3>
+              <dl class="facts">
+                <div><dt>Notifications</dt><dd>30 an hour</dd></div>
+                <div><dt>Silent refreshes</dt><dd>120 an hour</dd></div>
+              </dl>
+              <p>All your servers together, so one busy server can’t drown out the rest.</p>
+            </li>
+            <li class="card feature reveal">
+              <h3>Per server</h3>
+              <dl class="facts">
+                <div><dt>New server</dt><dd>600 an hour</dd></div>
+                <div><dt>Established server</dt><dd>6,000 an hour</dd></div>
+              </dl>
+              <p>A server becomes established after seven days without hitting a limit.</p>
+            </li>
+            <li class="card feature reveal d1">
+              <h3>Size and batching</h3>
+              <dl class="facts">
+                <div><dt>Request size</dt><dd>2 KiB</dd></div>
+                <div><dt>Phones per request</dt><dd>up to 25</dd></div>
+              </dl>
+              <p>Bursts should be batched, for example one notification per incident rather than per check.</p>
+            </li>
+          </ul>
+
+          <ul class="grid">
+            <li class="card feature reveal">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#check-circle"></use></svg></span>
+              <h3>Fair use</h3>
+              <p>Send only to phones whose owners gave your server a handle, and only “something changed” signals. No bulk or promotional sending.</p>
+            </li>
+            <li class="card feature reveal d1">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#alert"></use></svg></span>
+              <h3>No guarantee</h3>
+              <p>Apple’s push service doesn’t guarantee delivery, and neither does Pigeon. The apps never rely on push alone.</p>
+            </li>
+            <li class="card feature reveal d2">
+              <span class="list-icon"><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#shield"></use></svg></span>
+              <h3>Misuse has limits too</h3>
+              <p>Servers that keep hitting limits are suspended, and you can cut off a single server from the app at any time. An abuse contact will be published when Pigeon opens.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- Developers ====================================================== -->
+      <section class="section section-alt" id="developers" aria-labelledby="developers-title">
+        <div class="wrap">
+          <div class="split">
+            <div class="split-copy reveal">
+              <p class="eyebrow">For server developers</p>
+              <h2 class="headline" id="developers-title">A small, plain API.</h2>
+              <p class="sub">
+                Pigeon speaks JSON over HTTPS under <code>/v1</code>. A server registers itself with a
+                small proof of work and no sign-up, then sends pushes to the handles its users gave it.
+                A server can send nothing to anyone who hasn’t given it a handle.
+              </p>
+              <ul class="ticks vole-ticks">
+                <li>Open registration, no approval step.</li>
+                <li>A request names up to 25 handles, a kind (<code>alert</code> or <code>sync</code>) and an opaque reference.</li>
+                <li>The answer has one result per handle: <code>accepted</code>, <code>duplicate</code>, <code>gone</code>, <code>limited</code> or <code>unavailable</code>.</li>
+                <li>Pigeon never receives your server’s address, and your server never receives a phone’s address.</li>
+                <li>Changes within <code>/v1</code> are additive only. A breaking change gets <code>/v2</code>, served alongside for at least a year.</li>
+              </ul>
+              <p class="split-note">
+                The full API and the design are in the
+                <a href="https://github.com/Ferdinand99/Postal-Pigeon/tree/main/docs">docs folder</a>
+                of the repository. The API is not final until the first release.
+              </p>
+            </div>
+            <div class="split-art reveal d1">
+              <div class="code-card">
+                <pre tabindex="0" aria-label="Example request to send a push"><code><span class="c">// Sent by your server. Content-free by design.</span>
+POST /v1/push
+Authorization: Bearer &lt;instance credential&gt;
+
+{
+  "event_id": "7f6c8e0e-…",
+  "handles": ["hrh_…"],
+  "kind": "alert",
+  "ref": "inc_9f3a1c",
+  "ttl": 3600
+}
+
+<span class="c">// The answer, one result per handle</span>
+{ "results": [ { "status": "accepted" } ] }</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Status ========================================================== -->
+      <section class="section" id="status" aria-labelledby="status-title">
+        <div class="wrap">
+          <header class="section-head reveal">
+            <p class="eyebrow">Status</p>
+            <h2 class="headline" id="status-title">In development, not public yet.</h2>
+            <p class="sub">
+              The design and threat model are written and published, and the relay is being built. There
+              is nothing to sign up for or install yet, and there are no dates: each step is done when it
+              works.
+            </p>
+          </header>
+
+          <ol class="roadmap">
+            <li class="milestone is-done reveal">
+              <span class="ms-marker" aria-hidden="true"><svg class="icon"><use href="assets/icons.svg#check"></use></svg></span>
+              <div class="ms-body">
+                <p class="ms-status"><span class="pill status-up"><span class="dot"></span>Done</span></p>
+                <h3>Design and threat model</h3>
+                <p>The API, how phones and servers register, what is stored and for how long, the limits, key handling and the privacy statement, all published.</p>
+              </div>
+            </li>
+            <li class="milestone is-now reveal">
+              <span class="ms-marker" aria-hidden="true"><span class="dot is-live"></span></span>
+              <div class="ms-body">
+                <p class="ms-status"><span class="pill status-accent"><span class="dot"></span>Now</span></p>
+                <h3>Building the relay</h3>
+                <p>One small Rust service with a SQLite database, behind a TLS proxy, with a health endpoint and an admin command line.</p>
+              </div>
+            </li>
+            <li class="milestone reveal">
+              <span class="ms-marker" aria-hidden="true"></span>
+              <div class="ms-body">
+                <p class="ms-status"><span class="pill">Then</span></p>
+                <h3>Hedgerow app and servers switch it on</h3>
+                <p>The Hedgerow iOS app and the servers get push support, off by default, and are tested end to end with real devices.</p>
+              </div>
+            </li>
+            <li class="milestone reveal">
+              <span class="ms-marker" aria-hidden="true"></span>
+              <div class="ms-body">
+                <p class="ms-status"><span class="pill">Then</span></p>
+                <h3>The official Pigeon opens</h3>
+                <p>With the API description, a conformance test suite and an abuse contact published alongside it.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- FAQ ============================================================= -->
+      <section class="section section-alt" id="faq" aria-labelledby="faq-title">
+        <div class="wrap">
+          <header class="section-head reveal">
+            <h2 class="headline" id="faq-title">Questions.</h2>
+          </header>
+          <ul class="faq reveal">
+            <li>
+              <details>
+                <summary>Can I use it now?<svg class="icon" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg></summary>
+                <div class="faq-body">
+                  <p>
+                    Not yet. It is in development and the official relay isn’t public. Watch or star the
+                    <a href="https://github.com/Ferdinand99/Postal-Pigeon">repository</a> to hear about progress.
+                  </p>
+                </div>
+              </details>
+            </li>
+            <li>
+              <details>
+                <summary>Do I need it?<svg class="icon" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg></summary>
+                <div class="faq-body">
+                  <p>
+                    Only if you want push notifications on an iPhone from your own Hedgerow servers. On
+                    Android you don’t, and on iOS push is optional: without it the apps update when you open them.
+                  </p>
+                </div>
+              </details>
+            </li>
+            <li>
+              <details>
+                <summary>What happens if Pigeon is down?<svg class="icon" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg></summary>
+                <div class="faq-body">
+                  <p>
+                    Nothing breaks. Push is a speed-up, never a requirement. The apps keep working against
+                    your servers, and your servers’ other alert channels, such as e-mail, chat and
+                    webhooks, aren’t delayed. Pushes resume when Pigeon is back.
+                  </p>
+                </div>
+              </details>
+            </li>
+            <li>
+              <details>
+                <summary>Does it store my notifications?<svg class="icon" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg></summary>
+                <div class="faq-body">
+                  <p>
+                    There is nothing to store. A push carries no content and isn’t kept: if Pigeon
+                    can’t hand it to Apple, it is dropped, not queued for later. Pigeon keeps only a
+                    sealed device token, opaque handles and small counters.
+                  </p>
+                </div>
+              </details>
+            </li>
+            <li>
+              <details>
+                <summary>Can I run my own Pigeon?<svg class="icon" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg></summary>
+                <div class="faq-body">
+                  <p>
+                    Yes. It is open source and meant to be run as one small container. Because only the
+                    holder of an app’s push key can ring that app, a relay of your own is useful with
+                    your own build of the app and your own Apple developer account.
+                  </p>
+                </div>
+              </details>
+            </li>
+            <li>
+              <details>
+                <summary>Is it open source?<svg class="icon" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg></summary>
+                <div class="faq-body">
+                  <p>
+                    Yes, under the
+                    <a href="https://github.com/Ferdinand99/Postal-Pigeon/blob/main/LICENSE">GNU AGPL-3.0-only</a>.
+                    Contributions aren’t open yet. Please report security problems privately, as described in the
+                    <a href="https://github.com/Ferdinand99/Postal-Pigeon/blob/main/SECURITY.md">security policy</a>.
+                  </p>
+                </div>
+              </details>
+            </li>
+            <li>
+              <details>
+                <summary>Has it been audited?<svg class="icon" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg></summary>
+                <div class="faq-body">
+                  <p>
+                    No external audit is funded. The design keeps the relay small and content-free on
+                    purpose, so a mistake in it costs as little as possible, and the threat model is
+                    public for anyone to check.
+                  </p>
+                </div>
+              </details>
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="wrap">
+        <div class="footer-top">
+          <a class="brand" href="#top">
+            <img src="favicon.png" alt="" width="24" height="24" loading="lazy" />
+            <span>Postal Pigeon</span>
+          </a>
+          <span>Made in Norway</span>
+        </div>
+        <nav aria-label="Project links">
+          <ul class="footer-links">
+            <li><a href="https://github.com/Ferdinand99/Postal-Pigeon">GitHub</a></li>
+            <li><a href="https://github.com/Ferdinand99/Postal-Pigeon#readme">README</a></li>
+            <li><a href="https://github.com/Ferdinand99/Postal-Pigeon/tree/main/docs">Docs</a></li>
+            <li><a href="https://github.com/Ferdinand99/Postal-Pigeon/issues">Issues</a></li>
+            <li><a href="https://github.com/Ferdinand99/Postal-Pigeon/blob/main/SECURITY.md">Security</a></li>
+            <li><a href="https://github.com/Ferdinand99/Postal-Pigeon/blob/main/LICENSE">AGPL-3.0 license</a></li>
+          </ul>
+        </nav>
+        <p class="sibling">
+          Part of <a href="https://hedgerow.tools/">Hedgerow</a>, small self-hosted apps that live
+          together, with <a href="https://hedgerow.tools/Vigilant-Vole/">Vigilant Vole</a>, a
+          lightweight uptime monitor, <a href="https://hedgerow.tools/Nimble-Newt/">Nimble Newt</a>,
+          a fast text editor, <a href="https://hedgerow.tools/Keen-Kestrel/">Keen Kestrel</a>,
+          error tracking and analytics, <a href="https://hedgerow.tools/Wise-Wren/">Wise Wren</a>,
+          Docker container updates, and <a href="https://hedgerow.tools/Faithful-Ferret/">Faithful Ferret</a>,
+          a planned password manager.
+        </p>
+        <p>
+          Postal Pigeon is open source under the GNU AGPL-3.0 and is in development: not public
+          yet. This site uses no cookies and no analytics.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
