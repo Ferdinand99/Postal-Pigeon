@@ -1,0 +1,22 @@
+# Rust build output
+/target/
+
+# Runtime data and local secrets
+/data/
+/secrets/
+*.sqlite*
+*.p8
+.env
+.env.*
+!.env.example
+
+# Claude Code local state
+.claude/
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

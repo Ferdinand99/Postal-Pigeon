@@ -2,8 +2,8 @@
 
 Postal Pigeon ("Pigeon") is the Hedgerow push relay. In this document, "the relay" means Postal Pigeon.
 
-Status: design phase. This document describes what will be built. Nothing here is implemented, and details may
-still change before the first release.
+Status: version 1 is implemented (see the notes at the end of section 17 for where the code differs from or adds to this
+document). Details may still change before the first release.
 
 ## Contents
 
@@ -23,7 +23,7 @@ still change before the first release.
 14. [Privacy statement](#14-privacy-statement)
 15. [Versioning](#15-versioning)
 16. [Threat model](#16-threat-model)
-17. [Open questions](#17-open-questions)
+17. [Decisions](#17-decisions-owner-2026-10-27)
 
 ---
 
@@ -648,3 +648,33 @@ The owner accepted every recommended default:
 6. **Reverse proxy access logs are kept for seven days.**
 7. **No blinded credentials** in version 1.
 8. **Free with the published limits**, an acceptable-use note and an abuse contact; no supporter tiers planned now.
+
+### Implementation notes for version 1
+
+Where the code adds to or differs from the text above. The behaviour in sections 6 to 10 is otherwise implemented as
+written, and [`api.md`](api.md) is the reference.
+
+- **Lean service, no `vole-kit`.** The kit would pull in sign-in, passkeys, templates, translations and mail for a
+  service that has none of them. The relay depends only on `axum`, `tokio`, `rusqlite`, `reqwest` (HTTP/2, rustls),
+  `aws-lc-rs` and a few small crates, and reimplements the small pieces it needs: token buckets, AES-256-GCM sealing
+  with HKDF, a health endpoint and JSON error conventions. All cryptography (AES-GCM, HKDF, HMAC, SHA-256, the ES256
+  signature for the APNs token) is `aws-lc-rs`.
+- **Device registration is option B** exactly as described; the relay keeps no instance to device link at rest. The
+  in-memory "already sent" set stores a hash of (instance, event, handle) for 15 minutes, and only for pushes Apple
+  accepted, so a failed push can be retried with the same `event_id`.
+- **Additions to the API:** result status `unsupported_kind` (a device's app does not accept that `kind`; clients treat
+  unknown statuses as `unavailable`), error codes `registration_closed`, `limit_reached` and the challenge errors
+  `invalid_challenge`, `challenge_expired`, `challenge_used`, `invalid_proof`. A wrong credential also counts against
+  the caller's address (60 per hour) so keys can't be guessed.
+- **Storage additions:** `devices.token_set_ms` is the moment a token was registered, to the millisecond, because the
+  `410 Unregistered` rule compares it with Apple's timestamp (a time of day, kept only for that comparison).
+  `instance_usage` has a fourth counter, `throttled`, for the daily auto-suspension, and `instances.flagged` marks an
+  instance for review.
+- **Configuration** is environment variables (`PP_*`) and key files rather than a configuration file; the limits can be
+  overridden by a JSON file (`PP_LIMITS_FILE`). Seal key rotation is by configuration (`PP_SEAL_OLD_KEY_FILES`) and a
+  background or `admin reseal` pass, instead of an "add a seal key" command.
+- **Time-sensitive notifications** are left to the app, which sets the interruption level in its Notification Service
+  Extension when the user opts in. The relay never sets it, so a server can't make a notification break through Focus.
+- **Not in version 1:** signed images and reproducible builds (the image is built in CI from the tagged source), the
+  OpenAPI description and conformance suite (section 15), Critical Alerts, and a public abuse-contact address in the
+  service itself.
