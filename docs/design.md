@@ -2,8 +2,8 @@
 
 Postal Pigeon ("Pigeon") is the Hedgerow push relay. In this document, "the relay" means Postal Pigeon.
 
-Status: design phase. This document describes what will be built. Nothing here is implemented, and details may
-still change before the first release.
+Status: version 1 is implemented (see the notes at the end of section 17 for where the code differs from or adds to this
+document). Details may still change before the first release.
 
 ## Contents
 
@@ -23,7 +23,7 @@ still change before the first release.
 14. [Privacy statement](#14-privacy-statement)
 15. [Versioning](#15-versioning)
 16. [Threat model](#16-threat-model)
-17. [Open questions](#17-open-questions)
+17. [Decisions](#17-decisions-owner-2026-10-27)
 
 ---
 
@@ -648,3 +648,79 @@ The owner accepted every recommended default:
 6. **Reverse proxy access logs are kept for seven days.**
 7. **No blinded credentials** in version 1.
 8. **Free with the published limits**, an acceptable-use note and an abuse contact; no supporter tiers planned now.
+
+### Implementation notes for version 1
+
+Where the code adds to or differs from the text above. The behaviour in sections 6 to 10 is otherwise implemented as
+written, and [`api.md`](api.md) is the reference.
+
+- **Lean service, no `vole-kit`.** The kit would pull in sign-in, passkeys, templates, translations and mail for a
+  service that has none of them. The relay depends only on `axum`, `tokio`, `rusqlite`, `reqwest` (HTTP/2, rustls),
+  `aws-lc-rs` and a few small crates, and reimplements the small pieces it needs: token buckets, AES-256-GCM sealing
+  with HKDF, a health endpoint and JSON error conventions. All cryptography (AES-GCM, HKDF, HMAC, SHA-256, the ES256
+  signature for the APNs token) is `aws-lc-rs`.
+- **Device registration is option B** exactly as described; the relay keeps no instance to device link at rest. The
+  in-memory "already sent" set stores a hash of (instance, event, handle) for 15 minutes, and only for pushes Apple
+  accepted, so a failed push can be retried with the same `event_id`.
+- **Additions to the API:** result status `unsupported_kind` (a device's app does not accept that `kind`; clients treat
+  unknown statuses as `unavailable`), error codes `limit_reached` and the challenge errors
+  `invalid_challenge`, `challenge_expired`, `challenge_used`, `invalid_proof`. A wrong credential also counts against
+  the caller's address (60 per hour) so keys can't be guessed.
+- **Storage additions:** `devices.token_set_ms` is the moment a token was registered, to the millisecond, because the
+  `410 Unregistered` rule compares it with Apple's timestamp (a time of day, kept only for that comparison).
+  `instance_usage` has a fourth counter, `throttled`, for the daily auto-suspension, and `instances.flagged` marks an
+  instance for review.
+- **Configuration** is environment variables (`PP_*`) and key files rather than a configuration file; the limits can be
+  overridden by a JSON file (`PP_LIMITS_FILE`). Seal key rotation is by configuration (`PP_SEAL_OLD_KEY_FILES`) and a
+  background or `admin reseal` pass, instead of an "add a seal key" command.
+- **Time-sensitive notifications** are left to the app, which sets the interruption level in its Notification Service
+  Extension when the user opts in. The relay never sets it, so a server can't make a notification break through Focus.
+- **Not in version 1:** signed images and reproducible builds (the image is built in CI from the tagged source), the
+  OpenAPI description and conformance suite (section 15), Critical Alerts, and a public abuse-contact address in the
+  service itself.
+
+### Hardening after the October 2026 review
+
+Changes made to the implementation after a security review of the first version. They tighten the design and do not
+change the API's shape.
+
+- **Client address (sections 10, 12).** The relay refuses to start with a public URL and no trusted proxy
+  (`PP_ALLOW_NO_PROXY=1` overrides), and warns, at most once an hour, when a peer that is not trusted sends
+  `X-Forwarded-For`. Every `X-Forwarded-For` line counts, read from the right, skipping trusted proxies. The compose file
+  fixes its network and trusts one `/32`. A request with valid credentials is never held up by the failed-credential
+  limit; wrong and unknown ids are charged to the address.
+- **Registration pressure (section 6.1, 10).** The hard relay-wide cap of 200 registrations a day is gone: registration is never
+  closed to everybody. It is replaced by a
+  per-network limit (IPv4 /24, IPv6 /48; 25 a day) and a proof of work whose difficulty rises one bit for each doubling
+  of the last hour's registrations above 30 (up to 8 extra bits). The difficulty is inside the signed challenge. The
+  Above a high-water mark of 5000 registrations a day the proof of work gets 4 more bits, `/v1/status` says
+  `"registration": "busy"` and the log warns every hour. Address limits are checked before a challenge is remembered, and
+  `GET /v1/challenge` refuses an address that has used its budget. Device registration also has a per-network bucket, and
+  registering a token the relay already holds is allowed when the table is full.
+- **Unverified devices and the strike breaker (section 8).** A device Apple has never accepted a push for may be sent to
+  3 times an hour until one succeeds. `BadDeviceToken` and similar answers about devices that have worked before are
+  watched per app (unverified junk is neither counted nor protected: it is struck and deleted as usual): when 10 devices,
+  for at least 3 different instances, answer
+  that way within 10 minutes and they are half of the app's answers, nothing is struck or deleted for an hour,
+  `/v1/status` says `degraded` and the log says why. `BadTopic` and `TopicDisallowed` are configuration errors, never
+  a strike. `admin check-apns` asks Apple about the key, team and topic with a made-up device token and changes nothing.
+- **Relay-wide answers from Apple (section 8).** `TooManyProviderTokenUpdates`, and any 429 with a reason other than
+  `TooManyRequests`, pause all sends. The provider token is shared between the relay and the `admin` commands through a
+  file (mode 0600) in a runtime folder (a tmpfs in the container), under a file lock, so they never make more tokens than
+  Apple allows. The reason strings follow Apple's "Handling notification responses from APNs".
+- **Storage (section 9).** Re-sealing is a compare-and-swap, so it can't overwrite a token the app rotated meanwhile.
+  `secure_delete` is on and the write-ahead log is truncated hourly, so deleted tokens and handles don't linger in free
+  pages or the log.
+- **Pushes (sections 6.4, 8).** Alert collapse ids are a keyed hash of the handle and the instance's value, so two
+  servers sharing a device can't replace each other's alerts. A handle listed twice in a request is sent once. An event is
+  claimed before it is sent, so concurrent requests with one `event_id` send once, a claim is released unless the push was
+  accepted (also when the request is cancelled mid-send), and a full set drops its oldest entry in constant time
+  instead of turning off. A request with more unknown handles than the allowance is refused whole (documented in
+  `api.md`).
+- **Serving (section 12).** The relay uses `hyper` directly because `axum::serve` sets no header-read or idle timeout:
+  each request's headers must arrive within 10 seconds, which also ends idle keep-alive connections, and at most 4096
+  connections are open. `/healthz` has its own small pool of permits, so it answers while other requests are shed.
+- **Secrets and logs (section 11).** Key files that other users can read are refused (mode 0400 or 0600), the seal and
+  HMAC keys must differ, key material is wiped from memory after loading, APNs addresses must be https (a hidden
+  test-only flag aside), and `RUST_LOG` only sets the relay's own level: other crates stay at `warn`, the provider token's
+  header is marked sensitive, so no log level prints the token or a device token.

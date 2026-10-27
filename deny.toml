@@ -1,0 +1,3 @@
+# cargo-deny configuration, used by the Audit workflow (advisories only).
+[advisories]
+ignore = []

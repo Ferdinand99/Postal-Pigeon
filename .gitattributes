@@ -1,0 +1,32 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Text sources always use LF, also in Windows checkouts
+*.rs       text eol=lf
+*.toml     text eol=lf
+*.md       text eol=lf
+*.html     text eol=lf
+*.css      text eol=lf
+*.js       text eol=lf
+*.mjs      text eol=lf
+*.ts       text eol=lf
+*.json     text eol=lf
+*.webmanifest text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.sql      text eol=lf
+*.sh       text eol=lf
+*.svg      text eol=lf
+Dockerfile text eol=lf
+
+# Snapshot tests are compared byte for byte
+*.snap     text eol=lf
+
+# Binary files: never diff or convert
+*.png      binary
+*.ico      binary
+*.woff2    binary
+*.webp     binary
+*.sqlite   binary
+*.zip      binary
+*.ini      text eol=lf
