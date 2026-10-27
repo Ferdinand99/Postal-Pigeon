@@ -634,33 +634,17 @@ A compromised phone (the attacker already has the app's keychain), a malicious o
 installs a modified app, and attacks on the self-hosted servers themselves (each product's own security notes cover
 those).
 
-## 17. Open questions
+## 17. Decisions (owner, 2026-10-27)
 
-Only the questions that change what gets built. Each has a recommended default so work can continue.
+The owner accepted every recommended default:
 
-1. **Open instance registration from day one?** Recommended: yes, open, with proof of work and the "new" tier, since
-   the first users are on TestFlight and the limits protect devices either way. The alternative is an allow-list
-   (manual approval) until the apps are public, which removes the proof of work and the registration endpoint's
-   public exposure for now but adds manual work.
-2. **Require Apple App Attest on device registration?** It proves that a registration comes from a genuine install of
-   the app and nearly ends device-registration spam, but needs verification of Apple's attestation on the relay and
-   app work. Recommended: not in version 1; rely on rate limits and expiry; revisit if spam appears.
-3. **Critical alerts and time-sensitive notifications.** A "service is down" alert is the kind of thing users want to
-   break through Do Not Disturb. Critical alerts need a special Apple entitlement that must be requested, and would add
-   a `critical` kind and an opt-in in the app. Recommended: ship with normal alerts, apply for the entitlement
-   separately, and consider `time-sensitive` (no entitlement beyond a capability) as a user setting.
-4. **Admin tooling:** a command-line admin only (recommended for version 1, smallest attack surface), or a small
-   protected admin page built on the family's kit (nicer, but adds authentication, a UI and its attack surface to a
-   service that holds the APNs key).
-5. **Build on the full kit or a lean service?** Recommended: a lean axum service that reuses only the kit's building
-   blocks that fit (request budgets, sealed secrets, HTTP conventions, health), not its sign-in, pages and i18n, to
-   keep the relay small. This decides the dependency set and the size of the first build.
-6. **Operator log policy:** keep reverse proxy access logs for seven days (the figure used in this document) or switch
-   address logging off for the relay's host name altogether? The second is more private but makes abuse
-   investigations harder. The number in the privacy statement follows the answer.
-7. **Blinded credentials for the instance-to-handle link.** Privacy Pass-style tokens would stop the relay from seeing
-   which instance sent a push, even in memory. Recommended: not now (a large addition for a small gain given the
-   address is visible anyway); confirm it stays out of version 1.
-8. **Funding and acceptable use.** Will the official relay stay free with the limits above, with a published
-   acceptable-use note and an abuse contact, or should the design leave room for tiers tied to a supporter
-   programme? Only matters now if limits or accounts need to differ per supporter.
+1. **Instance registration is open from day one**, with proof of work and the "new" tier's lower limits.
+2. **No App Attest in version 1**; rely on rate limits and expiry, and revisit if registration spam appears.
+3. **Normal alerts in version 1.** Apply for the Critical Alerts entitlement separately; offer `time-sensitive` as a
+   user setting in the apps.
+4. **Command-line admin only** in version 1 (no admin web page).
+5. **A lean axum service** that reuses only the kit's building blocks that fit (request budgets, sealed secrets, HTTP
+   conventions, health), not its sign-in, pages or i18n.
+6. **Reverse proxy access logs are kept for seven days.**
+7. **No blinded credentials** in version 1.
+8. **Free with the published limits**, an acceptable-use note and an abuse contact; no supporter tiers planned now.
