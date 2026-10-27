@@ -26,8 +26,18 @@ pub struct Limits {
     pub instance_reg_per_addr_day: u32,
     /// Instance registrations per day in total; above it `503` until tomorrow.
     pub instance_reg_per_day: u32,
+    /// Instance registrations per day from one network (the IPv4 /24 or IPv6 /48).
+    pub instance_reg_per_prefix_day: u32,
+    /// Registrations in the last hour above which the proof of work gets harder,
+    /// one more bit for every doubling.
+    pub pow_adaptive_threshold_per_hour: u32,
+    /// Most extra bits the adaptive proof of work adds.
+    pub pow_adaptive_max_extra_bits: u32,
     pub device_reg_per_addr_hour: u32,
     pub device_reg_per_addr_day: u32,
+    /// Device registrations per hour and per day from one network (IPv4 /24, IPv6 /48).
+    pub device_reg_per_prefix_hour: u32,
+    pub device_reg_per_prefix_day: u32,
     /// Hard cap on device rows.
     pub max_devices: u32,
     pub handle_create_per_device_hour: u32,
@@ -60,6 +70,24 @@ pub struct Limits {
     pub max_tracked_keys: usize,
     /// Requests handled at once; more are shed with `503`.
     pub max_inflight_requests: usize,
+    /// Extra permits only /healthz uses, so it answers while the rest is shed.
+    pub health_inflight_requests: usize,
+    /// Connections open at once; more wait in the kernel backlog.
+    pub max_connections: usize,
+    /// Seconds a client has to send its request headers, also the idle time of
+    /// a kept-alive connection.
+    pub header_read_timeout_secs: u64,
+    /// Sends per hour for a device that has never had a push accepted.
+    pub unverified_device_per_hour: u32,
+    /// Distinct devices answering `BadDeviceToken` (or another strike-worthy
+    /// answer) within the window that stop all striking and deleting.
+    pub strike_trip_devices: u32,
+    /// And the share of an app's answers in the window that they must be, in percent.
+    pub strike_trip_percent: u32,
+    /// Length of that window in seconds.
+    pub strike_window_secs: i64,
+    /// How long striking stays off once tripped, in seconds.
+    pub strike_trip_secs: i64,
 }
 
 impl Default for Limits {
@@ -68,9 +96,16 @@ impl Default for Limits {
             pow_difficulty: 20,
             challenge_ttl_secs: 300,
             instance_reg_per_addr_day: 5,
-            instance_reg_per_day: 200,
+            // A safety cap only; the per-address and per-network limits and
+            // the adaptive proof of work do the real work.
+            instance_reg_per_day: 5000,
+            instance_reg_per_prefix_day: 25,
+            pow_adaptive_threshold_per_hour: 30,
+            pow_adaptive_max_extra_bits: 8,
             device_reg_per_addr_hour: 20,
             device_reg_per_addr_day: 100,
+            device_reg_per_prefix_hour: 100,
+            device_reg_per_prefix_day: 500,
             max_devices: 1_000_000,
             handle_create_per_device_hour: 10,
             max_handles_per_device: 32,
@@ -91,6 +126,14 @@ impl Default for Limits {
             max_handles_per_request: 25,
             max_tracked_keys: 100_000,
             max_inflight_requests: 2048,
+            health_inflight_requests: 16,
+            max_connections: 4096,
+            header_read_timeout_secs: 10,
+            unverified_device_per_hour: 3,
+            strike_trip_devices: 10,
+            strike_trip_percent: 50,
+            strike_window_secs: 600,
+            strike_trip_secs: 3600,
         }
     }
 }
@@ -107,7 +150,31 @@ impl Limits {
         if self.challenge_ttl_secs < 10 {
             return Err("challenge_ttl_secs must be at least 10".into());
         }
+        if self.pow_difficulty + self.pow_adaptive_max_extra_bits > 40 {
+            return Err(
+                "pow_difficulty plus pow_adaptive_max_extra_bits above 40 is not solvable".into(),
+            );
+        }
+        if self.strike_trip_percent > 100 || self.strike_trip_devices == 0 {
+            return Err(
+                "strike_trip_percent is 0 to 100 and strike_trip_devices at least 1".into(),
+            );
+        }
         Ok(())
+    }
+
+    /// The proof-of-work difficulty to ask for when `recent` instances
+    /// registered in the last hour: the base, plus one bit for every doubling
+    /// above the threshold, up to the configured maximum.
+    pub fn difficulty_for(&self, recent: u32) -> u32 {
+        let threshold = self.pow_adaptive_threshold_per_hour.max(1);
+        let mut extra = 0;
+        let mut level = u64::from(threshold);
+        while u64::from(recent) >= level && extra < self.pow_adaptive_max_extra_bits {
+            extra += 1;
+            level *= 2;
+        }
+        self.pow_difficulty + extra
     }
 }
 
@@ -206,14 +273,21 @@ impl Limiter {
     }
 
     /// Frees room for a new key: drops buckets that are full again (they carry
-    /// no information), and if that is not enough, forgets everything.
+    /// no information), and if that is not enough, evicts the least recently
+    /// used tenth, so a flood of new keys can't wipe everybody's history.
     fn make_room(&self, map: &mut HashMap<String, Bucket>, now: i64) {
         map.retain(|_, b| {
             let elapsed = (now - b.last_ms).max(0) as f64;
             b.tokens + elapsed * self.refill_per_ms < self.burst
         });
         if map.len() >= self.max_keys {
-            map.clear();
+            let mut by_age: Vec<(i64, String)> =
+                map.iter().map(|(k, b)| (b.last_ms, k.clone())).collect();
+            by_age.sort_unstable();
+            let drop = (self.max_keys / 10).max(1);
+            for (_, k) in by_age.into_iter().take(drop) {
+                map.remove(&k);
+            }
         }
     }
 
@@ -285,6 +359,14 @@ impl<K: Hash + Eq> TimedSet<K> {
         Ok(true)
     }
 
+    /// Forgets `key`.
+    pub fn remove(&self, key: &K) {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
+    }
+
     /// Drops expired entries.
     pub fn prune(&self) {
         let now = self.clock.now_ms();
@@ -300,6 +382,69 @@ impl<K: Hash + Eq> TimedSet<K> {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<K: Hash + Eq + Clone> TimedSet<K> {
+    /// Adds `key` like [`TimedSet::insert`] and returns whether it is new, but
+    /// when the set is full of live entries it forgets the oldest one instead
+    /// of refusing, so the set never silently stops working.
+    pub fn insert_evicting(&self, key: K) -> bool {
+        let now = self.clock.now_ms();
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(&key).is_some_and(|exp| *exp > now) {
+            return false;
+        }
+        if map.len() >= self.max {
+            map.retain(|_, exp| *exp > now);
+            if map.len() >= self.max {
+                let oldest = map
+                    .iter()
+                    .min_by_key(|(_, exp)| **exp)
+                    .map(|(k, _)| k.clone());
+                if let Some(oldest) = oldest {
+                    map.remove(&oldest);
+                }
+            }
+        }
+        map.insert(key, now + self.ttl_ms);
+        true
+    }
+}
+
+/// Counts events over the last hour, in one-minute steps.
+pub struct RecentCounter {
+    clock: Clock,
+    slots: Mutex<[(i64, u32); 60]>,
+}
+
+impl RecentCounter {
+    pub fn new(clock: &Clock) -> Self {
+        RecentCounter {
+            clock: clock.clone(),
+            slots: Mutex::new([(i64::MIN, 0); 60]),
+        }
+    }
+
+    pub fn record(&self) {
+        let minute = self.clock.now_secs().div_euclid(60);
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = &mut slots[minute.rem_euclid(60) as usize];
+        if slot.0 != minute {
+            *slot = (minute, 0);
+        }
+        slot.1 = slot.1.saturating_add(1);
+    }
+
+    /// Events in the last 60 minutes.
+    pub fn last_hour(&self) -> u32 {
+        let minute = self.clock.now_secs().div_euclid(60);
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots
+            .iter()
+            .filter(|(m, _)| *m > minute - 60 && *m <= minute)
+            .map(|(_, n)| *n)
+            .fold(0u32, u32::saturating_add)
     }
 }
 
@@ -357,6 +502,78 @@ mod tests {
         assert_eq!(s.insert(3), Ok(true));
     }
 
+    #[test]
+    fn full_limiter_evicts_the_least_recently_used_not_everything() {
+        let clock = Clock::new();
+        let l = Limiter::per_hour(&clock, 2, 2, 20);
+        // One heavy user, spending its budget, then a flood of other keys.
+        assert!(l.take("heavy").is_ok());
+        assert!(l.take("heavy").is_ok());
+        assert!(l.take("heavy").is_err());
+        for i in 0..40 {
+            clock.advance_secs(1);
+            let _ = l.take(&format!("flood{i}"));
+        }
+        assert!(l.len() <= 20);
+        // The flood used the newest keys; the heavy user was the oldest, so it
+        // may be forgotten, but the newest flood keys are all still there.
+        assert!(l.has("flood39", 1).is_ok());
+        assert!(l.take("flood39").is_ok());
+
+        assert!(
+            l.take("flood39").is_err(),
+            "recent history survives eviction"
+        );
+    }
+
+    #[test]
+    fn evicting_set_never_stops_working() {
+        let clock = Clock::new();
+        let s: TimedSet<u32> = TimedSet::new(&clock, 100, 3);
+        for i in 0..3 {
+            assert!(s.insert_evicting(i));
+            clock.advance_secs(1);
+        }
+        assert!(!s.insert_evicting(2), "a live entry is a duplicate");
+        assert!(s.insert_evicting(10), "full: the oldest goes");
+        assert!(!s.contains(&0) && s.contains(&1) && s.contains(&10));
+        s.remove(&10);
+        assert!(!s.contains(&10));
+    }
+
+    #[test]
+    fn recent_counter_counts_the_last_hour() {
+        let clock = Clock::new();
+        let c = RecentCounter::new(&clock);
+        for _ in 0..5 {
+            c.record();
+        }
+        assert_eq!(c.last_hour(), 5);
+        clock.advance_secs(30 * 60);
+        c.record();
+        assert_eq!(c.last_hour(), 6);
+        clock.advance_secs(31 * 60);
+        assert_eq!(c.last_hour(), 1, "the first five are older than an hour");
+        clock.advance_secs(3600);
+        assert_eq!(c.last_hour(), 0);
+    }
+
+    #[test]
+    fn difficulty_rises_with_volume_up_to_a_cap() {
+        let l = Limits {
+            pow_difficulty: 20,
+            pow_adaptive_threshold_per_hour: 30,
+            pow_adaptive_max_extra_bits: 3,
+            ..Limits::default()
+        };
+        assert_eq!(l.difficulty_for(0), 20);
+        assert_eq!(l.difficulty_for(29), 20);
+        assert_eq!(l.difficulty_for(30), 21);
+        assert_eq!(l.difficulty_for(59), 21);
+        assert_eq!(l.difficulty_for(60), 22);
+        assert_eq!(l.difficulty_for(120), 23);
+        assert_eq!(l.difficulty_for(1_000_000), 23, "capped");
+    }
     #[test]
     fn default_limits_are_valid() {
         assert!(Limits::default().validate().is_ok());

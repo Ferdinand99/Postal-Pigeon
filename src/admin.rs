@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use clap::Subcommand;
 
 use crate::api::push::{Message, Status, deliver};
-use crate::apns::default_ttl_secs;
+use crate::apns::{Outcome, PushRequest, default_ttl_secs};
 use crate::config::Kind;
 use crate::crypto::{PREFIX_HANDLE, ct_eq, is_device_id, parse_id_secret};
 use crate::db;
@@ -47,6 +47,9 @@ pub enum AdminCommand {
         #[arg(long, default_value = "alert")]
         kind: String,
     },
+    /// Check the APNs key, team and topics against Apple without touching any
+    /// device or the database. Run it after deploying and after changing the key.
+    CheckApns,
     /// Re-seal device tokens under the current seal key now.
     Reseal,
     /// Run the housekeeping pass now (retention, tiers, re-sealing).
@@ -154,7 +157,7 @@ pub async fn run(state: &AppState, cmd: AdminCommand) -> Result<String, String> 
                     u.sends, u.limited, u.failures, u.throttled
                 );
             }
-            let _ = writeln!(out, "apns: {}", state.apns.status());
+            let _ = writeln!(out, "apns: {}", state.apns_status());
             Ok(out)
         }
         AdminCommand::SendTest { device, kind } => {
@@ -170,11 +173,13 @@ pub async fn run(state: &AppState, cmd: AdminCommand) -> Result<String, String> 
                     reference: Some("test"),
                     collapse: None,
                     ttl_secs: default_ttl_secs(kind),
+                    scope: &dev.id,
                 },
             )
             .await;
             Ok(format!("{}\n", describe(&status)))
         }
+        AdminCommand::CheckApns => check_apns(state).await,
         AdminCommand::Reseal => {
             let n = maintenance::reseal(state).map_err(db_err)?;
             Ok(format!("re-sealed {n} tokens\n"))
@@ -224,4 +229,68 @@ fn find_device(state: &AppState, given: &str) -> Result<Option<(db::DeviceRow, S
     Ok(found
         .filter(|(h, _)| ct_eq(&h.hash, &hash))
         .map(|(h, d)| (d, h.tag)))
+}
+
+/// Sends a push for a made-up device token to every configured app and
+/// environment, and reads Apple's answer. Apple checks the provider token and
+/// the topic before it looks at the device token, so `BadDeviceToken` for the
+/// made-up token means the key, team and topic were accepted. Nothing is
+/// deleted or recorded. A wrong environment can only be told with a real
+/// device: use `send-test` for that.
+async fn check_apns(state: &AppState) -> Result<String, String> {
+    let token = "00".repeat(32);
+    let mut out = String::new();
+    let mut failed = false;
+    for app in &state.settings.apps {
+        for env in &state.settings.environments {
+            let outcome = state
+                .apns
+                .send(&PushRequest {
+                    token: &token,
+                    env: *env,
+                    topic: &app.bundle_id,
+                    kind: Kind::Sync,
+                    tag: "probe",
+                    reference: None,
+                    collapse: None,
+                    ttl_secs: 60,
+                })
+                .await;
+            let (ok, text) = match outcome {
+                Outcome::BadToken
+                | Outcome::Unregistered { .. }
+                | Outcome::Accepted
+                | Outcome::TooManyRequests { .. } => (
+                    true,
+                    "ok: Apple accepted the key, the team and the topic".to_string(),
+                ),
+                Outcome::ConfigError(r) => (
+                    false,
+                    format!(
+                        "FAILED: Apple refused the topic ({r}). Check the bundle id in PP_APPS and that \
+                         the key belongs to the team that owns the app"
+                    ),
+                ),
+                Outcome::OperatorProblem(r) => (
+                    false,
+                    format!(
+                        "FAILED: Apple refused the provider token ({r}). Check PP_APNS_KEY_ID, \
+                         PP_APNS_TEAM_ID and the .p8 file"
+                    ),
+                ),
+                Outcome::RelayBackoff { retry_after } => (
+                    false,
+                    format!("WAIT: Apple asked the relay to back off for {retry_after} s"),
+                ),
+                Outcome::Failed => (false, "FAILED: could not reach Apple".to_string()),
+            };
+            failed |= !ok;
+            let _ = writeln!(out, "{} {}: {text}", app.id, env.as_str());
+        }
+    }
+    let _ = writeln!(
+        out,
+        "A wrong environment shows only with a real device: use `admin send-test`."
+    );
+    if failed { Err(out) } else { Ok(out) }
 }

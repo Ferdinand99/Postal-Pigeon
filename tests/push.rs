@@ -129,7 +129,13 @@ async fn an_alert_reaches_apple_with_the_designed_headers_and_payload() {
     assert_eq!(rec.header("apns-push-type"), "alert");
     assert_eq!(rec.header("apns-priority"), "10");
     assert_eq!(rec.header("apns-topic"), BUNDLE);
-    assert_eq!(rec.header("apns-collapse-id"), "a-inc_9f3a1c");
+    // Apple sees a keyed hash scoped to the handle, never the raw value.
+    let collapse = rec.header("apns-collapse-id");
+    assert!(
+        collapse.starts_with("a-") && collapse.len() <= 64,
+        "{collapse}"
+    );
+    assert!(!collapse.contains("inc_9f3a1c"));
     assert!(is_uuid(rec.header("apns-id")));
     let exp: i64 = rec.header("apns-expiration").parse().unwrap();
     let want = w.app.clock.now_secs() + 3600;

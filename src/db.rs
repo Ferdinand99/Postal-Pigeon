@@ -25,7 +25,8 @@ CREATE TABLE devices (
     created_day    INTEGER NOT NULL,
     token_set_ms   INTEGER NOT NULL,
     last_seen_day  INTEGER NOT NULL,
-    strikes        INTEGER NOT NULL DEFAULT 0
+    strikes        INTEGER NOT NULL DEFAULT 0,
+    verified       INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE handles (
     id            TEXT PRIMARY KEY,
@@ -82,6 +83,8 @@ impl Db {
     fn init(conn: Connection) -> DbResult<Db> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // Deleted rows (tokens, handles) are overwritten, not left in free pages.
+        conn.pragma_update(None, "secure_delete", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 1 {
@@ -286,10 +289,12 @@ pub struct DeviceRow {
     pub token_set_ms: i64,
     pub last_seen_day: i64,
     pub strikes: i64,
+    /// Whether Apple has ever accepted a push for this device.
+    pub verified: bool,
 }
 
 const DEVICE_COLS: &str = "d.id, d.key_hash, d.app, d.environment, d.token_sealed, d.seal_key_id, \
-                           d.created_day, d.token_set_ms, d.last_seen_day, d.strikes";
+                           d.created_day, d.token_set_ms, d.last_seen_day, d.strikes, d.verified";
 
 fn device_from(r: &rusqlite::Row<'_>) -> DbResult<DeviceRow> {
     device_from_at(r, 0)
@@ -307,6 +312,7 @@ fn device_from_at(r: &rusqlite::Row<'_>, o: usize) -> DbResult<DeviceRow> {
         token_set_ms: r.get(o + 7)?,
         last_seen_day: r.get(o + 8)?,
         strikes: r.get(o + 9)?,
+        verified: r.get::<_, i64>(o + 10)? != 0,
     })
 }
 
@@ -392,10 +398,21 @@ pub fn delete_device(c: &Connection, id: &str) -> DbResult<bool> {
     Ok(c.execute("DELETE FROM devices WHERE id = ?1", [id])? > 0)
 }
 
-/// A keep-alive or a successful push: sets the last-seen date, clears strikes.
+/// A keep-alive: sets the last-seen date.
 pub fn touch_device(c: &Connection, id: &str, day: i64) -> DbResult<()> {
     c.execute(
-        "UPDATE devices SET last_seen_day = MAX(last_seen_day, ?2), strikes = 0 WHERE id = ?1",
+        "UPDATE devices SET last_seen_day = MAX(last_seen_day, ?2) WHERE id = ?1",
+        params![id, day],
+    )?;
+    Ok(())
+}
+
+/// Apple accepted a push: the device is real. Sets the last-seen date, clears
+/// strikes and ends the small send quota of a device that was never verified.
+pub fn mark_verified(c: &Connection, id: &str, day: i64) -> DbResult<()> {
+    c.execute(
+        "UPDATE devices SET last_seen_day = MAX(last_seen_day, ?2), strikes = 0, verified = 1
+         WHERE id = ?1",
         params![id, day],
     )?;
     Ok(())
@@ -441,12 +458,40 @@ pub fn devices_to_reseal(
     rows.collect()
 }
 
-pub fn set_sealed(c: &Connection, id: &str, key_id: &str, sealed: &str) -> DbResult<()> {
-    c.execute(
-        "UPDATE devices SET seal_key_id = ?2, token_sealed = ?3 WHERE id = ?1",
-        params![id, key_id, sealed],
-    )?;
-    Ok(())
+/// Replaces a sealed token only if the row still holds the value that was read
+/// (compare-and-swap), so re-sealing can't overwrite a token the app rotated in
+/// the meantime. Returns whether it wrote.
+pub fn set_sealed_if(
+    c: &Connection,
+    id: &str,
+    old_key_id: &str,
+    old_sealed: &str,
+    new_key_id: &str,
+    new_sealed: &str,
+) -> DbResult<bool> {
+    Ok(c.execute(
+        "UPDATE devices SET seal_key_id = ?4, token_sealed = ?5
+         WHERE id = ?1 AND seal_key_id = ?2 AND token_sealed = ?3",
+        params![id, old_key_id, old_sealed, new_key_id, new_sealed],
+    )? > 0)
+}
+
+/// Whether a device with this token fingerprint exists (registering it again
+/// replaces it, so it doesn't add a row).
+pub fn device_fp_exists(c: &Connection, fp: &[u8]) -> DbResult<bool> {
+    Ok(c.query_row(
+        "SELECT 1 FROM devices WHERE token_fp = ?1",
+        [fp],
+        |_| Ok(()),
+    )
+    .optional()?
+    .is_some())
+}
+
+/// Folds the write-ahead log into the database file and truncates it, so
+/// deleted rows don't linger in the log.
+pub fn checkpoint(c: &Connection) -> DbResult<()> {
+    c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
 }
 
 // ---- Handles -------------------------------------------------------------
@@ -690,10 +735,76 @@ mod tests {
             assert_eq!(add_strike(c, "d1").unwrap(), 1);
             assert_eq!(add_strike(c, "d1").unwrap(), 2);
             touch_device(c, "d1", 11).unwrap();
-            assert_eq!(get_device(c, "d1").unwrap().unwrap().strikes, 0);
+            assert_eq!(
+                get_device(c, "d1").unwrap().unwrap().strikes,
+                2,
+                "a keep-alive is not a success"
+            );
+            assert!(!get_device(c, "d1").unwrap().unwrap().verified);
+            mark_verified(c, "d1", 11).unwrap();
+            let d = get_device(c, "d1").unwrap().unwrap();
+            assert_eq!((d.strikes, d.verified, d.last_seen_day), (0, true, 11));
         });
     }
 
+    #[test]
+    fn resealing_is_compare_and_swap() {
+        let db = Db::open_memory().unwrap();
+        db.with(|c| {
+            insert_device(c, &device("d1", b"fp")).unwrap();
+            // The row still holds what was read: written.
+            assert!(set_sealed_if(c, "d1", "kid", "s", "new", "s2").unwrap());
+            // Someone changed it since (a rotated token, another re-seal): not written.
+            assert!(!set_sealed_if(c, "d1", "kid", "s", "newer", "s3").unwrap());
+            let d = get_device(c, "d1").unwrap().unwrap();
+            assert_eq!(
+                (d.seal_key_id.as_str(), d.token_sealed.as_str()),
+                ("new", "s2")
+            );
+        });
+    }
+
+    #[test]
+    fn fingerprint_lookup() {
+        let db = Db::open_memory().unwrap();
+        db.with(|c| {
+            insert_device(c, &device("d1", b"fp")).unwrap();
+            assert!(device_fp_exists(c, b"fp").unwrap());
+            assert!(!device_fp_exists(c, b"other").unwrap());
+        });
+    }
+
+    #[test]
+    fn secure_delete_and_checkpoint_on_a_file_database() {
+        let dir = std::env::temp_dir().join(format!("pp-db-{}", crate::util::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.sqlite");
+        let db = Db::open(&path).unwrap();
+        db.with(|c| {
+            let on: i64 = c
+                .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(on, 1, "deleted rows are overwritten");
+            for i in 0..50 {
+                let id = format!("d{i}");
+                let fp = [i as u8; 4];
+                insert_device(c, &device(&id, &fp)).unwrap();
+            }
+            let wal = dir.join("t.sqlite-wal");
+            assert!(
+                std::fs::metadata(&wal).unwrap().len() > 0,
+                "writes sit in the log"
+            );
+            checkpoint(c).unwrap();
+            assert_eq!(
+                std::fs::metadata(&wal).unwrap().len(),
+                0,
+                "the log is truncated"
+            );
+        });
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
     #[test]
     fn deleting_a_device_removes_its_handles() {
         let db = Db::open_memory().unwrap();

@@ -176,22 +176,29 @@ pub fn addr_prefix(ip: IpAddr) -> String {
 
 /// The client address of a request: the peer, unless the peer is a trusted
 /// proxy, in which case the right-most `X-Forwarded-For` entry that is not
-/// itself a trusted proxy.
-pub fn client_ip(peer: IpAddr, forwarded_for: Option<&str>, trusted: &[IpNet]) -> IpAddr {
+/// itself a trusted proxy. `forwarded` holds every `X-Forwarded-For` header
+/// line in order (a request may carry several); they are read as one list,
+/// from the right.
+pub fn client_ip(peer: IpAddr, forwarded: &[&str], trusted: &[IpNet]) -> IpAddr {
     let is_trusted = |ip: IpAddr| trusted.iter().any(|n| n.contains(ip));
     if !is_trusted(peer) {
         return peer.to_canonical();
     }
-    if let Some(list) = forwarded_for {
-        for part in list.rsplit(',') {
+    for line in forwarded.iter().rev() {
+        for part in line.rsplit(',') {
             match part.trim().parse::<IpAddr>() {
                 Ok(ip) if is_trusted(ip) => continue,
                 Ok(ip) => return ip.to_canonical(),
-                Err(_) => break,
+                Err(_) => return peer.to_canonical(),
             }
         }
     }
     peer.to_canonical()
+}
+
+/// The key of the coarser prefix bucket: the /24 for IPv4 and the /48 for IPv6.
+pub fn prefix_key(ip: IpAddr) -> String {
+    format!("p:{}", addr_prefix(ip))
 }
 
 /// Number of leading zero bits of a byte string.
@@ -263,18 +270,50 @@ mod tests {
 
     #[test]
     fn forwarded_for_only_from_trusted_proxies() {
-        let trusted = [IpNet::parse("10.0.0.1").unwrap()];
+        let trusted = [
+            IpNet::parse("10.0.0.1").unwrap(),
+            IpNet::parse("10.0.0.2").unwrap(),
+        ];
         let peer: IpAddr = "10.0.0.1".parse().unwrap();
         let other: IpAddr = "198.51.100.9".parse().unwrap();
         // An untrusted peer can't choose its own address.
-        assert_eq!(client_ip(other, Some("1.2.3.4"), &trusted), other);
+        assert_eq!(client_ip(other, &["1.2.3.4"], &trusted), other);
         // A trusted proxy's right-most entry counts, a spoofed left one doesn't.
         assert_eq!(
-            client_ip(peer, Some("9.9.9.9, 203.0.113.5"), &trusted),
+            client_ip(peer, &["9.9.9.9, 203.0.113.5"], &trusted),
             "203.0.113.5".parse::<IpAddr>().unwrap()
         );
-        assert_eq!(client_ip(peer, None, &trusted), peer);
-        assert_eq!(client_ip(peer, Some("garbage"), &trusted), peer);
+        assert_eq!(client_ip(peer, &[], &trusted), peer);
+        assert_eq!(client_ip(peer, &["garbage"], &trusted), peer);
+        // Several header lines are one list: the proxy's line is the last one,
+        // and a client-supplied line before it can't win.
+        assert_eq!(
+            client_ip(peer, &["9.9.9.9", "203.0.113.5"], &trusted),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+        // Trusted hops are skipped, across lines too.
+        assert_eq!(
+            client_ip(peer, &["9.9.9.9, 203.0.113.5", "10.0.0.2"], &trusted),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+        // A bad entry on the way stops the walk: the peer is used.
+        assert_eq!(client_ip(peer, &["203.0.113.5", "junk"], &trusted), peer);
+    }
+
+    #[test]
+    fn prefix_keys_group_networks() {
+        assert_eq!(
+            prefix_key("203.0.113.5".parse().unwrap()),
+            prefix_key("203.0.113.200".parse().unwrap())
+        );
+        assert_ne!(
+            prefix_key("203.0.113.5".parse().unwrap()),
+            prefix_key("203.0.114.5".parse().unwrap())
+        );
+        assert_eq!(
+            prefix_key("2001:db8:1:2::1".parse().unwrap()),
+            prefix_key("2001:db8:1:ffff::1".parse().unwrap())
+        );
     }
 
     #[test]

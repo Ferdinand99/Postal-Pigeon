@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiError, ApiJson, ApiResult, ClientAddr, bearer};
+use super::{ApiError, ApiJson, ApiResult, ClientAddr, bearer, charge_failure};
 use crate::config::Env;
 use crate::crypto::{
     PREFIX_HANDLE, ct_eq, is_device_id, is_handle_id, new_device_id, new_id_secret, new_manage_key,
@@ -16,7 +16,7 @@ use crate::crypto::{
 };
 use crate::db::{self, DeviceRow, NewDevice};
 use crate::state::AppState;
-use crate::util::{b64_decode, day_string};
+use crate::util::{b64_decode, day_string, prefix_key};
 
 /// Normalises a device token: hexadecimal, 32 to 200 bytes, lower case.
 fn clean_token(token: &str) -> Option<String> {
@@ -70,6 +70,19 @@ pub async fn register(
         .device_reg_addr_day
         .take(&key)
         .map_err(ApiError::rate_limited)?;
+    // A coarser bucket for the whole network (the IPv4 /24 or IPv6 /48), so
+    // spreading over many addresses of one network does not help.
+    let prefix = prefix_key(addr.0);
+    state
+        .limiters
+        .device_reg_prefix_hour
+        .take(&prefix)
+        .map_err(ApiError::rate_limited)?;
+    state
+        .limiters
+        .device_reg_prefix_day
+        .take(&prefix)
+        .map_err(ApiError::rate_limited)?;
 
     let device_id = new_device_id();
     let (manage_key, key_hash) = new_manage_key();
@@ -82,8 +95,9 @@ pub async fn register(
     let stored = state
         .db
         .call(move |c| {
-            // A record with the same token is replaced, so it doesn't count.
-            if db::count_devices(c)? >= max {
+            // A record with the same token is replaced, so it adds no row and
+            // is allowed even when the table is full.
+            if !db::device_fp_exists(c, &fp)? && db::count_devices(c)? >= max {
                 return Ok(false);
             }
             db::insert_device(
@@ -121,27 +135,18 @@ async fn authorize(
     device_id: &str,
 ) -> ApiResult<DeviceRow> {
     if !is_device_id(device_id) {
-        return Err(ApiError::not_found());
+        return Err(charge_failure(state, addr, ApiError::not_found()));
     }
-    let key = addr.key();
-    state
-        .limiters
-        .auth_failures
-        .has(&key, 1)
-        .map_err(ApiError::rate_limited)?;
     let id = device_id.to_string();
     let device = state
         .db
         .call(move |c| db::get_device(c, &id))
         .await?
-        .ok_or_else(ApiError::not_found)?;
+        .ok_or_else(|| charge_failure(state, addr, ApiError::not_found()))?;
     let presented = bearer(headers).and_then(parse_manage_key);
     match presented {
         Some(hash) if ct_eq(&hash, &device.key_hash) => Ok(device),
-        _ => {
-            let _ = state.limiters.auth_failures.take(&key);
-            Err(ApiError::invalid_credentials())
-        }
+        _ => Err(charge_failure(state, addr, ApiError::invalid_credentials())),
     }
 }
 

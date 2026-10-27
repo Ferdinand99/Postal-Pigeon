@@ -18,6 +18,7 @@ use aws_lc_rs::digest;
 use aws_lc_rs::hkdf::{HKDF_SHA256, Salt};
 use aws_lc_rs::hmac;
 use aws_lc_rs::rand;
+use zeroize::Zeroizing;
 
 use crate::util::{b64, b64_decode, random_bytes};
 
@@ -133,28 +134,42 @@ impl fmt::Display for KeyError {
 
 impl std::error::Error for KeyError {}
 
-/// Reads a key file: 64 hex characters, or URL-safe base64, for at least 32
-/// bytes. Warns if other users can read it.
-pub fn read_key_file(path: &Path) -> Result<Vec<u8>, KeyError> {
+/// Refuses a key file that other users can read or write (mode other than
+/// 0400 or 0600 on Unix). A key everybody can read is not a key.
+pub fn check_key_mode(path: &Path) -> Result<(), KeyError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Ok(meta) = std::fs::metadata(path)
-            && meta.permissions().mode() & 0o077 != 0
-        {
-            tracing::warn!(
-                "{} is readable by other users; use mode 0400 or 0600",
+        let meta = std::fs::metadata(path)
+            .map_err(|e| KeyError(format!("can't read {}: {e}", path.display())))?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(KeyError(format!(
+                "{} has mode {mode:04o}, which other users can use; run chmod 0400 on it",
                 path.display()
-            );
+            )));
         }
     }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| KeyError(format!("can't read {}: {e}", path.display())))?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Reads a key file: 64 hex characters, or URL-safe base64, for at least 32
+/// bytes. Refuses a file other users can read. The bytes are wiped from memory
+/// when dropped.
+pub fn read_key_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, KeyError> {
+    check_key_mode(path)?;
+    let text = Zeroizing::new(
+        std::fs::read_to_string(path)
+            .map_err(|e| KeyError(format!("can't read {}: {e}", path.display())))?,
+    );
     let text = text.trim();
     let bytes = hex::decode(text)
         .ok()
         .or_else(|| b64_decode(text))
         .ok_or_else(|| KeyError(format!("{} is not hex or base64", path.display())))?;
+    let bytes = Zeroizing::new(bytes);
     if bytes.len() < 32 {
         return Err(KeyError(format!(
             "{} holds fewer than 32 bytes",
@@ -172,6 +187,7 @@ pub fn generate_key_hex() -> String {
 const SEAL_SALT: &[u8] = b"postal-pigeon/seal/v1";
 const HMAC_DOMAIN_FP: &[u8] = b"postal-pigeon/token-fingerprint/v1";
 const HMAC_DOMAIN_CHALLENGE: &[u8] = b"postal-pigeon/challenge/v1";
+const HMAC_DOMAIN_COLLAPSE: &[u8] = b"postal-pigeon/collapse/v1";
 
 /// One sealing key and its id.
 pub struct SealKey {
@@ -227,7 +243,7 @@ pub struct Keys {
 }
 
 impl Keys {
-    pub fn new(hmac_bytes: &[u8], seal_bytes: &[u8], old_seal: &[Vec<u8>]) -> Self {
+    pub fn new(hmac_bytes: &[u8], seal_bytes: &[u8], old_seal: &[&[u8]]) -> Self {
         Keys {
             hmac: hmac::Key::new(hmac::HMAC_SHA256, hmac_bytes),
             current: SealKey::from_bytes(seal_bytes),
@@ -292,6 +308,20 @@ impl Keys {
     /// the same token (uniqueness), never reversible.
     pub fn token_fingerprint(&self, token: &str) -> [u8; 32] {
         self.mac(&[HMAC_DOMAIN_FP, token.as_bytes()])
+    }
+
+    /// The collapse id Apple sees for an alert: a keyed hash of the handle and
+    /// the instance's `collapse` value, so that two servers that share a device
+    /// (through different handles) can't replace each other's notifications by
+    /// choosing the same value, and nothing readable leaves the relay.
+    pub fn scoped_collapse(&self, scope: &str, collapse: &str) -> String {
+        let mac = self.mac(&[
+            HMAC_DOMAIN_COLLAPSE,
+            scope.as_bytes(),
+            &[0],
+            collapse.as_bytes(),
+        ]);
+        b64(&mac[..18])
     }
 
     /// MAC over a challenge's body.
@@ -371,11 +401,48 @@ mod tests {
         let hmac_key = random_bytes::<32>();
         let before = Keys::new(&hmac_key, &old, &[]);
         let (kid, sealed) = before.seal(b"tok", "d");
-        let after = Keys::new(&hmac_key, &random_bytes::<32>(), &[old.to_vec()]);
+        let after = Keys::new(&hmac_key, &random_bytes::<32>(), &[old.as_slice()]);
         assert_ne!(after.current_seal_id(), kid);
         assert_eq!(after.open(&kid, &sealed, "d").unwrap(), b"tok");
     }
 
+    #[test]
+    fn collapse_ids_are_scoped_to_the_handle() {
+        let k = Keys::ephemeral();
+        let a = k.scoped_collapse("handle-a", "incident-1");
+        assert_eq!(a, k.scoped_collapse("handle-a", "incident-1"));
+        assert_ne!(a, k.scoped_collapse("handle-b", "incident-1"));
+        assert_ne!(a, k.scoped_collapse("handle-a", "incident-2"));
+        assert!(!a.contains("incident"));
+        assert!(a.len() <= 30);
+        // The scope and the value can't be shifted into each other.
+        assert_ne!(k.scoped_collapse("ab", "c"), k.scoped_collapse("a", "bc"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_files_must_be_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("pp-key-{}", crate::util::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("k");
+        std::fs::write(&path, format!("{}\n", generate_key_hex())).unwrap();
+        for (mode, ok) in [
+            (0o600, true),
+            (0o400, true),
+            (0o640, false),
+            (0o644, false),
+            (0o604, false),
+        ] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(read_key_file(&path).is_ok(), ok, "mode {mode:o}");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_key_file(&path).unwrap().len(), 32);
+        std::fs::write(&path, "abcd").unwrap();
+        assert!(read_key_file(&path).is_err(), "too short");
+        let _ = std::fs::remove_dir_all(dir);
+    }
     #[test]
     fn fingerprints_are_keyed() {
         let a = Keys::ephemeral();

@@ -980,6 +980,8 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
+ "hyper",
+ "hyper-util",
  "reqwest",
  "rusqlite",
  "rustls",
@@ -989,6 +991,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

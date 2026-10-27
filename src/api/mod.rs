@@ -65,7 +65,14 @@ async fn not_found() -> ApiError {
 
 /// Sheds load beyond the in-flight limit and sets headers on every answer.
 async fn guard(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let Ok(_permit) = state.inflight.clone().try_acquire_owned() else {
+    // /healthz has a small pool of its own, so it keeps answering while the
+    // rest is being shed.
+    let pool = if req.uri().path() == "/healthz" {
+        &state.health_inflight
+    } else {
+        &state.inflight
+    };
+    let Ok(_permit) = pool.clone().try_acquire_owned() else {
         return ApiError::overloaded(1).into_response();
     };
     let mut resp = next.run(req).await;
@@ -97,15 +104,19 @@ impl FromRequestParts<AppState> for ClientAddr {
             .get::<ConnectInfo<SocketAddr>>()
             .map(|c| c.0.ip())
             .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        let forwarded = parts
+        // Every X-Forwarded-For line counts (a request may carry several), read
+        // from the right.
+        let forwarded: Vec<&str> = parts
             .headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok());
-        Ok(ClientAddr(client_ip(
-            peer,
-            forwarded,
-            &state.settings.trusted_proxies,
-        )))
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        let trusted = &state.settings.trusted_proxies;
+        if !forwarded.is_empty() && !trusted.iter().any(|n| n.contains(peer)) {
+            state.note_untrusted_forwarded_for();
+        }
+        Ok(ClientAddr(client_ip(peer, &forwarded, trusted)))
     }
 }
 
@@ -146,4 +157,15 @@ pub fn bearer(headers: &HeaderMap) -> Option<&str> {
         .eq_ignore_ascii_case("bearer")
         .then_some(secret.trim())
         .filter(|s| !s.is_empty())
+}
+
+/// Charges a failed attempt (wrong secret, unknown id) to the caller's address
+/// and returns the error to send; once the address has used up its failures, it
+/// gets `429` instead. Requests that present valid credentials never come here,
+/// so a flood of bad ones from a shared address can't lock the good ones out.
+pub(crate) fn charge_failure(state: &AppState, addr: &ClientAddr, err: ApiError) -> ApiError {
+    match state.limiters.auth_failures.take(&addr.key()) {
+        Ok(()) => err,
+        Err(wait) => ApiError::rate_limited(wait),
+    }
 }

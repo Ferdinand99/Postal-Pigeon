@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Semaphore;
@@ -11,7 +12,8 @@ use crate::clock::Clock;
 use crate::config::Settings;
 use crate::crypto::Keys;
 use crate::db::Db;
-use crate::limits::{Limiter, Limits, TimedSet};
+use crate::guard::StrikeGuard;
+use crate::limits::{Limiter, Limits, RecentCounter, TimedSet};
 
 /// How long a handled `event_id` is remembered (seconds).
 pub const EVENT_TTL_SECS: i64 = 15 * 60;
@@ -20,8 +22,12 @@ pub const EVENT_TTL_SECS: i64 = 15 * 60;
 /// instance, a handle, a device or an app), never by a pair.
 pub struct Limiters {
     pub instance_reg_addr: Limiter,
+    pub instance_reg_prefix: Limiter,
     pub device_reg_addr_hour: Limiter,
     pub device_reg_addr_day: Limiter,
+    pub device_reg_prefix_hour: Limiter,
+    pub device_reg_prefix_day: Limiter,
+    pub unverified_device: Limiter,
     pub handle_create: Limiter,
     pub device_update: Limiter,
     pub alert_handle: Limiter,
@@ -40,6 +46,20 @@ impl Limiters {
         let k = l.max_tracked_keys;
         Limiters {
             instance_reg_addr: Limiter::per_day(clock, l.instance_reg_per_addr_day, k),
+            instance_reg_prefix: Limiter::per_day(clock, l.instance_reg_per_prefix_day, k),
+            device_reg_prefix_hour: Limiter::per_hour(
+                clock,
+                l.device_reg_per_prefix_hour,
+                l.device_reg_per_prefix_hour,
+                k,
+            ),
+            device_reg_prefix_day: Limiter::per_day(clock, l.device_reg_per_prefix_day, k),
+            unverified_device: Limiter::per_hour(
+                clock,
+                l.unverified_device_per_hour,
+                l.unverified_device_per_hour,
+                k,
+            ),
             device_reg_addr_hour: Limiter::per_hour(
                 clock,
                 l.device_reg_per_addr_hour,
@@ -116,6 +136,10 @@ impl Limiters {
     fn prune(&self) {
         for l in [
             &self.instance_reg_addr,
+            &self.instance_reg_prefix,
+            &self.device_reg_prefix_hour,
+            &self.device_reg_prefix_day,
+            &self.unverified_device,
             &self.device_reg_addr_hour,
             &self.device_reg_addr_day,
             &self.handle_create,
@@ -150,6 +174,14 @@ pub struct Inner {
     backoff: Mutex<HashMap<String, i64>>,
     /// Requests being handled; more than the limit are shed.
     pub inflight: Arc<Semaphore>,
+    /// A small separate pool for /healthz, so it answers while the rest is shed.
+    pub health_inflight: Arc<Semaphore>,
+    /// Instance registrations in the last hour (drives the adaptive proof of work).
+    pub registrations: RecentCounter,
+    /// Pauses striking and deleting when many devices answer badly at once.
+    pub guard: StrikeGuard,
+    /// When the last "X-Forwarded-For from an untrusted peer" warning was logged (ms).
+    xff_warned_ms: AtomicI64,
 }
 
 /// Cheap to clone; derefs to [`Inner`].
@@ -172,12 +204,58 @@ impl AppState {
             events: TimedSet::new(&clock, EVENT_TTL_SECS, limits.max_tracked_keys),
             backoff: Mutex::new(HashMap::new()),
             inflight: Arc::new(Semaphore::new(limits.max_inflight_requests)),
+            health_inflight: Arc::new(Semaphore::new(limits.health_inflight_requests)),
+            registrations: RecentCounter::new(&clock),
+            guard: StrikeGuard::new(
+                &clock,
+                limits.strike_window_secs,
+                limits.strike_trip_devices,
+                limits.strike_trip_percent,
+                limits.strike_trip_secs,
+            ),
+            xff_warned_ms: AtomicI64::new(i64::MIN),
             settings,
             db,
             keys,
             clock,
             apns,
         }))
+    }
+
+    /// `ok`, `degraded` or `unknown`: Apple's recent answers, and whether the
+    /// strike breaker is open.
+    pub fn apns_status(&self) -> &'static str {
+        if self.guard.is_tripped() {
+            "degraded"
+        } else {
+            self.apns.status()
+        }
+    }
+
+    /// The proof-of-work difficulty to ask for now.
+    pub fn current_difficulty(&self) -> u32 {
+        self.settings
+            .limits
+            .difficulty_for(self.registrations.last_hour())
+    }
+
+    /// Logs, at most once an hour, that a peer we do not trust sent
+    /// `X-Forwarded-For`: usually the proxy's address is missing from
+    /// `PP_TRUSTED_PROXIES`, and every client then shares one address.
+    pub fn note_untrusted_forwarded_for(&self) {
+        let now = self.clock.now_ms();
+        let last = self.xff_warned_ms.load(Ordering::Relaxed);
+        if (last == i64::MIN || now - last >= 3_600_000)
+            && self
+                .xff_warned_ms
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!(
+                "a peer that is not in PP_TRUSTED_PROXIES sent X-Forwarded-For; \
+                 if that is your reverse proxy, add its address, or all clients share one address"
+            );
+        }
     }
 
     /// Remembers that Apple asked us to back off from a device.

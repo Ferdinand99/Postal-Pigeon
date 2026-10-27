@@ -7,12 +7,12 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiError, ApiJson, ApiResult, ClientAddr, bearer};
+use super::{ApiError, ApiJson, ApiResult, ClientAddr, bearer, charge_failure};
 use crate::crypto::{PREFIX_INSTANCE, ct_eq, new_id_secret, new_secret_for, parse_id_secret};
 use crate::db::{self, InstanceRow};
 use crate::pow::{self, PowError};
 use crate::state::AppState;
-use crate::util::{DAY_SECS, addr_prefix, rfc3339};
+use crate::util::{DAY_SECS, addr_prefix, prefix_key, rfc3339};
 
 /// The products that may register (informational only; not an identity proof).
 pub const PRODUCTS: [&str; 4] = [
@@ -23,14 +23,38 @@ pub const PRODUCTS: [&str; 4] = [
 ];
 
 /// `GET /v1/challenge`
-pub async fn challenge(State(state): State<AppState>) -> impl IntoResponse {
+///
+/// Asks for the current difficulty, which rises with recent registration
+/// volume. An address that has already used up its registrations gets `429`
+/// instead of a challenge, so it can't pile up work the relay would only throw
+/// away.
+pub async fn challenge(
+    State(state): State<AppState>,
+    addr: ClientAddr,
+) -> ApiResult<impl IntoResponse> {
     let limits = &state.settings.limits;
-    let (challenge, expires) = pow::issue(&state.keys, &state.clock, limits.challenge_ttl_secs);
-    Json(json!({
+    state
+        .limiters
+        .instance_reg_addr
+        .has(&addr.key(), 1)
+        .map_err(ApiError::rate_limited)?;
+    state
+        .limiters
+        .instance_reg_prefix
+        .has(&prefix_key(addr.0), 1)
+        .map_err(ApiError::rate_limited)?;
+    let difficulty = state.current_difficulty();
+    let (challenge, expires) = pow::issue(
+        &state.keys,
+        &state.clock,
+        limits.challenge_ttl_secs,
+        difficulty,
+    );
+    Ok(Json(json!({
         "challenge": challenge,
-        "difficulty": limits.pow_difficulty,
+        "difficulty": difficulty,
         "expires_at": rfc3339(expires),
-    }))
+    })))
 }
 
 #[derive(Deserialize)]
@@ -46,6 +70,14 @@ fn valid_version(v: &str) -> bool {
     v.len() <= 32
         && v.bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'+' | b'-'))
+}
+
+fn challenge_used() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "challenge_used",
+        "the challenge was already used; fetch a new one",
+    )
 }
 
 /// `POST /v1/instances`
@@ -64,48 +96,53 @@ pub async fn register(
     }
 
     let limits = &state.settings.limits;
-    let id = pow::verify(
+    let checked = pow::check(
         &state.keys,
         &state.clock,
         limits.challenge_ttl_secs,
-        limits.pow_difficulty,
         &body.challenge,
-        &body.nonce,
     )
     .map_err(|e| match e {
-        PowError::Invalid => ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_challenge",
-            "the challenge was not issued by this relay",
-        ),
         PowError::Expired => ApiError::new(
             StatusCode::BAD_REQUEST,
             "challenge_expired",
             "the challenge has expired; fetch a new one",
         ),
-        PowError::BadProof => ApiError::new(
+        _ => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_challenge",
+            "the challenge was not issued by this relay",
+        ),
+    })?;
+    if state.challenges.contains(&checked.id) {
+        return Err(challenge_used());
+    }
+    pow::check_proof(&body.challenge, &body.nonce, checked.difficulty).map_err(|_| {
+        ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_proof",
             "the nonce does not meet the difficulty",
-        ),
+        )
     })?;
-    match state.challenges.insert(id) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "challenge_used",
-                "the challenge was already used; fetch a new one",
-            ));
-        }
-        Err(_) => return Err(ApiError::overloaded(60)),
-    }
 
+    // The address and network limits come before the challenge is remembered,
+    // so a flood of solved-but-limited requests can't fill the used-challenge
+    // set and lock everybody else out.
     state
         .limiters
         .instance_reg_addr
         .take(&addr.key())
         .map_err(ApiError::rate_limited)?;
+    state
+        .limiters
+        .instance_reg_prefix
+        .take(&prefix_key(addr.0))
+        .map_err(ApiError::rate_limited)?;
+    match state.challenges.insert(checked.id) {
+        Ok(true) => {}
+        Ok(false) => return Err(challenge_used()),
+        Err(_) => return Err(ApiError::overloaded(60)),
+    }
 
     let today = state.clock.today();
     let per_day = i64::from(limits.instance_reg_per_day);
@@ -134,6 +171,7 @@ pub async fn register(
         }
         cred.full
     };
+    state.registrations.record();
 
     Ok((
         StatusCode::CREATED,
@@ -149,34 +187,26 @@ pub async fn register(
     ))
 }
 
-/// Checks the instance credential in `Authorization`. Wrong credentials count
-/// against the caller's address.
+/// Checks the instance credential in `Authorization`. Valid credentials are
+/// never held up by the failure limit; a wrong or unknown one is charged to the
+/// caller's address (and answered `429` once the address has used its budget).
 pub(super) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
     addr: &ClientAddr,
 ) -> ApiResult<InstanceRow> {
-    let key = addr.key();
-    state
-        .limiters
-        .auth_failures
-        .has(&key, 1)
-        .map_err(ApiError::rate_limited)?;
-    let fail = || {
-        let _ = state.limiters.auth_failures.take(&key);
-        ApiError::invalid_credentials()
-    };
-
-    let presented = bearer(headers).ok_or_else(fail)?;
-    let (id, hash) = parse_id_secret(PREFIX_INSTANCE, presented).ok_or_else(fail)?;
+    let presented = bearer(headers)
+        .ok_or_else(|| charge_failure(state, addr, ApiError::invalid_credentials()))?;
+    let (id, hash) = parse_id_secret(PREFIX_INSTANCE, presented)
+        .ok_or_else(|| charge_failure(state, addr, ApiError::invalid_credentials()))?;
     let lookup = id.clone();
     let row = state
         .db
         .call(move |c| db::get_instance(c, &lookup))
         .await?
-        .ok_or_else(ApiError::unknown_instance)?;
+        .ok_or_else(|| charge_failure(state, addr, ApiError::unknown_instance()))?;
     if !ct_eq(&row.hash, &hash) {
-        return Err(fail());
+        return Err(charge_failure(state, addr, ApiError::invalid_credentials()));
     }
     if row.state != "active" {
         return Err(ApiError::suspended());

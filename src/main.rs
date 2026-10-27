@@ -8,7 +8,6 @@ use clap::{Parser, Subcommand};
 use postal_pigeon::admin::{self, AdminCommand};
 use postal_pigeon::config::ConfigArgs;
 use postal_pigeon::{crypto, server};
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "postal-pigeon", version, about = "The Hedgerow push relay")]
@@ -38,7 +37,7 @@ async fn main() {
     let cli = Cli::parse();
 
     // Colours only on a terminal: `docker logs` gets plain text.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = postal_pigeon::logging::filter(std::env::var("RUST_LOG").ok().as_deref());
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_ansi(std::io::stdout().is_terminal())

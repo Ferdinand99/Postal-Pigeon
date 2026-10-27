@@ -44,6 +44,9 @@ pub fn run_once(state: &AppState) -> Result<Report, rusqlite::Error> {
         })
     })?;
     report.resealed = reseal(state)?;
+    // Fold the write-ahead log into the file and truncate it, so deleted rows
+    // do not linger in it.
+    state.db.with(|c| db::checkpoint(c))?;
     state.prune_memory();
     Ok(report)
 }
@@ -64,10 +67,14 @@ pub fn reseal(state: &AppState) -> Result<usize, rusqlite::Error> {
                 continue;
             };
             let (new_kid, new_sealed) = state.keys.seal(&plain, &id);
-            state
+            // Only if the row still holds what was read: a token the app rotated
+            // in the meantime must not be overwritten with the old one.
+            let swapped = state
                 .db
-                .with(|c| db::set_sealed(c, &id, &new_kid, &new_sealed))?;
-            progressed += 1;
+                .with(|c| db::set_sealed_if(c, &id, &kid, &sealed, &new_kid, &new_sealed))?;
+            if swapped {
+                progressed += 1;
+            }
         }
         done += progressed;
         if progressed == 0 {
@@ -93,6 +100,15 @@ pub async fn run_forever(state: AppState) {
                 "maintenance"
             ),
             _ => tracing::error!("maintenance_failed"),
+        }
+        for r in state.guard.ratios() {
+            tracing::info!(
+                app = %r.app,
+                answers = r.answers,
+                bad = r.bad,
+                bad_devices = r.bad_devices,
+                "apns_bad_token_ratio"
+            );
         }
     }
 }

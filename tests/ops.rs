@@ -2,9 +2,6 @@
 
 mod common;
 
-use std::io::Write;
-use std::sync::{Arc, Mutex};
-
 use common::*;
 use postal_pigeon::admin::{self, AdminCommand};
 use postal_pigeon::crypto::Keys;
@@ -323,7 +320,7 @@ async fn sealing_keys_can_be_rotated() {
     let cred = before.new_instance().await;
 
     let after = TestApp::builder()
-        .keys(Keys::new(&hmac, &new, &[old.to_vec()]))
+        .keys(Keys::new(&hmac, &new, &[old.as_slice()]))
         .db(db)
         .build()
         .await;
@@ -348,35 +345,11 @@ async fn sealing_keys_can_be_rotated() {
     assert_eq!(maintenance::reseal(&after.state).unwrap(), 0);
 }
 
-#[derive(Clone, Default)]
-struct LogBuf(Arc<Mutex<Vec<u8>>>);
-
-impl Write for LogBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn logs_never_hold_tokens_handles_credentials_refs_or_addresses() {
-    let buf = LogBuf::default();
-    let sub = tracing_subscriber::fmt()
-        .with_writer({
-            let buf = buf.clone();
-            move || buf.clone()
-        })
-        .with_ansi(false)
-        .with_env_filter(tracing_subscriber::EnvFilter::new(
-            "info,postal_pigeon=trace",
-        ))
-        .finish();
-    let _guard = tracing::subscriber::set_default(sub);
-
+    // The filter the binary uses, with the most verbose setting: other crates
+    // still stay at warn.
+    let (buf, _guard) = capture_logs(postal_pigeon::logging::filter(Some("trace")));
     let app = TestApp::new().await;
     let cred = app.new_instance().await;
     let tok = token(0x99);
@@ -420,7 +393,11 @@ async fn logs_never_hold_tokens_handles_credentials_refs_or_addresses() {
     )
     .await;
 
-    let logs = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    let logs = buf.text();
+    // The provider token Apple was sent, whole and in parts.
+    let auth = app.mock.requests()[0].header("authorization").to_string();
+    let jwt = auth.trim_start_matches("bearer ").to_string();
+    let jwt_signature = jwt.rsplit('.').next().unwrap().to_string();
     assert!(
         logs.contains("apns_operator_problem"),
         "the capture works:\n{logs}"
@@ -438,6 +415,8 @@ async fn logs_never_hold_tokens_handles_credentials_refs_or_addresses() {
         event.as_str(),
         "203.0.113",
         "198.51.",
+        jwt.as_str(),
+        jwt_signature.as_str(),
     ] {
         assert!(
             !logs.contains(secret),
@@ -577,4 +556,84 @@ async fn admin_commands() {
         .call("POST", "/v1/instances/self/rotate", Some(&cred), None)
         .await;
     assert_eq!(r.error(), "unknown_instance");
+}
+
+#[cfg(unix)]
+mod startup {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use postal_pigeon::crypto::generate_key_hex;
+    use postal_pigeon::server;
+
+    fn write(dir: &Path, name: &str, text: &str, mode: u32) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    /// Settings pointing at fresh, correct files in a new folder.
+    async fn setup() -> (postal_pigeon::config::Settings, PathBuf, TestApp) {
+        let app = TestApp::new().await;
+        let dir = std::env::temp_dir().join(format!("pp-start-{}", postal_pigeon::util::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = app.settings.clone();
+        s.data_dir = dir.join("data");
+        s.runtime_dir = dir.join("run");
+        s.seal_key_file = Some(write(&dir, "seal.key", &generate_key_hex(), 0o400));
+        s.hmac_key_file = Some(write(&dir, "hmac.key", &generate_key_hex(), 0o400));
+        s.apns.as_mut().unwrap().key_path = write(&dir, "apns.p8", &app.pem, 0o400);
+        (s, dir, app)
+    }
+
+    #[tokio::test]
+    async fn correct_files_start() {
+        let (s, dir, _app) = setup().await;
+        assert!(server::build_state(s).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn the_same_key_for_sealing_and_signing_is_refused() {
+        let (mut s, dir, _app) = setup().await;
+        let same = generate_key_hex();
+        s.seal_key_file = Some(write(&dir, "a.key", &same, 0o400));
+        s.hmac_key_file = Some(write(&dir, "b.key", &same, 0o400));
+        let err = server::build_state(s).err().unwrap().to_string();
+        assert!(err.contains("same key"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn key_files_other_users_can_read_are_refused() {
+        for which in ["seal", "hmac", "apns"] {
+            let (s, dir, _app) = setup().await;
+            let path = match which {
+                "seal" => s.seal_key_file.clone().unwrap(),
+                "hmac" => s.hmac_key_file.clone().unwrap(),
+                _ => s.apns.as_ref().unwrap().key_path.clone(),
+            };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let err = server::build_state(s).err().unwrap().to_string();
+            assert!(
+                err.contains("0644") && err.contains("chmod"),
+                "{which}: {err}"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_http_apns_addresses_are_refused_unless_the_test_flag_is_set() {
+        let (mut s, dir, _app) = setup().await;
+        s.allow_insecure_apns_urls = false;
+        s.apns_urls.production = "http://127.0.0.1:1".into();
+        let err = server::build_state(s.clone()).err().unwrap().to_string();
+        assert!(err.contains("https"), "{err}");
+        s.allow_insecure_apns_urls = true;
+        assert!(server::build_state(s).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

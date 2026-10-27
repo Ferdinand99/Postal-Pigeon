@@ -4,6 +4,7 @@
 //! stores no pair: usage is counted per instance, limits per handle, device and
 //! app, and the "already sent" memory holds only a hash of the three ids.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use axum::Json;
@@ -77,6 +78,9 @@ pub struct Message<'a> {
     pub reference: Option<&'a str>,
     pub collapse: Option<&'a str>,
     pub ttl_secs: i64,
+    /// What the collapse id is scoped to (the handle id, or the device id for an
+    /// admin test), so one server's `collapse` can't replace another's.
+    pub scope: &'a str,
 }
 
 /// Hands one push to Apple for `device` and applies what Apple says to the
@@ -99,6 +103,10 @@ pub async fn deliver(state: &AppState, device: &DeviceRow, tag: &str, msg: &Mess
         return Status::Unavailable(None);
     };
 
+    // What Apple sees as the collapse id is a keyed hash, never the raw value.
+    let collapse = msg
+        .collapse
+        .map(|c| state.keys.scoped_collapse(msg.scope, c));
     let outcome = state
         .apns
         .send(&PushRequest {
@@ -108,7 +116,7 @@ pub async fn deliver(state: &AppState, device: &DeviceRow, tag: &str, msg: &Mess
             kind: msg.kind,
             tag,
             reference: msg.reference,
-            collapse: msg.collapse,
+            collapse: collapse.as_deref(),
             ttl_secs: msg.ttl_secs,
         })
         .await;
@@ -116,11 +124,13 @@ pub async fn deliver(state: &AppState, device: &DeviceRow, tag: &str, msg: &Mess
     let id = device.id.clone();
     match outcome {
         Outcome::Accepted => {
+            state.guard.record_ok(&app.id, &device.id);
             let day = state.clock.today();
-            let _ = state.db.call(move |c| db::touch_device(c, &id, day)).await;
+            let _ = state.db.call(move |c| db::mark_verified(c, &id, day)).await;
             Status::Accepted
         }
         Outcome::Unregistered { timestamp_ms } => {
+            state.guard.record_ok(&app.id, &device.id);
             let ts = timestamp_ms.unwrap_or(i64::MAX);
             let _ = state
                 .db
@@ -129,6 +139,12 @@ pub async fn deliver(state: &AppState, device: &DeviceRow, tag: &str, msg: &Mess
             Status::Gone
         }
         Outcome::BadToken => {
+            // Feed the breaker first: if many devices answer like this at once
+            // the fault is ours, and nobody is struck or deleted.
+            state.guard.record_bad(&app.id, &device.id);
+            if state.guard.is_tripped() {
+                return Status::Unavailable(None);
+            }
             let strikes = state
                 .db
                 .call(move |c| {
@@ -146,11 +162,18 @@ pub async fn deliver(state: &AppState, device: &DeviceRow, tag: &str, msg: &Mess
                 Status::Unavailable(None)
             }
         }
+        Outcome::ConfigError(_) => {
+            // The relay's own bundle id or key: counts toward the breaker, never
+            // against the device.
+            state.guard.record_bad(&app.id, &device.id);
+            Status::Unavailable(None)
+        }
         Outcome::TooManyRequests { retry_after } => {
             state.set_backoff(&device.id, retry_after);
             Status::Limited(retry_after)
         }
-        Outcome::OperatorProblem | Outcome::Failed => Status::Unavailable(None),
+        Outcome::RelayBackoff { retry_after } => Status::Unavailable(Some(retry_after)),
+        Outcome::OperatorProblem(_) | Outcome::Failed => Status::Unavailable(None),
     }
 }
 
@@ -174,6 +197,24 @@ fn resolve(
         return Ok(None);
     };
     Ok(db::get_handle_with_device(c, &id)?.filter(|(h, _)| ct_eq(&h.hash, &hash)))
+}
+
+/// What a presented handle turned out to be.
+enum Resolved {
+    /// The same string appeared earlier in this request.
+    Repeat,
+    /// Unknown, revoked or malformed (indistinguishable on purpose).
+    Unknown,
+    Found(Box<(HandleRow, DeviceRow)>),
+}
+
+impl From<Option<(HandleRow, DeviceRow)>> for Resolved {
+    fn from(r: Option<(HandleRow, DeviceRow)>) -> Self {
+        match r {
+            Some(pair) => Resolved::Found(Box::new(pair)),
+            None => Resolved::Unknown,
+        }
+    }
 }
 
 /// Records a throttled request, and suspends the instance past the daily limit.
@@ -250,8 +291,17 @@ pub async fn push(
         Some(_) => return Err(ApiError::invalid("ttl is 60 to 86400 seconds")),
     };
 
-    // The instance's own limit, by tier: one send per handle.
-    let n = body.handles.len() as u32;
+    // A handle listed twice in one request counts and is sent once; the repeats
+    // answer `duplicate`.
+    let mut seen = HashSet::new();
+    let first: Vec<bool> = body
+        .handles
+        .iter()
+        .map(|h| seen.insert(h.as_str()))
+        .collect();
+
+    // The instance's own limit, by tier: one send per distinct handle.
+    let n = first.iter().filter(|f| **f).count() as u32;
     let tier_limiter = if inst.tier == "established" {
         &state.limiters.instance_established
     } else {
@@ -263,18 +313,30 @@ pub async fn push(
     }
 
     // Resolve every handle first, so an enumeration attempt is stopped before
-    // anything is sent.
+    // anything is sent. If the unknown ones are more than the instance's hourly
+    // allowance, the whole request is refused and nothing is sent.
     let presented = body.handles.clone();
+    let wanted = first.clone();
     let resolved = state
         .db
         .call(move |c| {
             presented
                 .iter()
-                .map(|p| resolve(c, p))
+                .zip(wanted)
+                .map(|(p, first)| {
+                    if first {
+                        resolve(c, p).map(Resolved::from)
+                    } else {
+                        Ok(Resolved::Repeat)
+                    }
+                })
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .await?;
-    let unknown = resolved.iter().filter(|r| r.is_none()).count() as u32;
+    let unknown = resolved
+        .iter()
+        .filter(|r| matches!(r, Resolved::Unknown))
+        .count() as u32;
     if unknown > 0
         && let Err(wait) = state.limiters.unknown_handles.take_n(&inst.id, unknown)
     {
@@ -289,9 +351,16 @@ pub async fn push(
         Kind::Sync => (&state.limiters.sync_handle, &state.limiters.sync_device),
     };
     for (i, r) in resolved.into_iter().enumerate() {
-        let Some((handle, device)) = r else {
-            results[i] = Some(Status::Gone);
-            continue;
+        let (handle, device) = match r {
+            Resolved::Repeat => {
+                results[i] = Some(Status::Duplicate);
+                continue;
+            }
+            Resolved::Unknown => {
+                results[i] = Some(Status::Gone);
+                continue;
+            }
+            Resolved::Found(pair) => *pair,
         };
         let Some(app) = state.settings.app(&device.app) else {
             results[i] = Some(Status::Gone);
@@ -301,10 +370,8 @@ pub async fn push(
             results[i] = Some(Status::UnsupportedKind);
             continue;
         }
-        if state
-            .events
-            .contains(&event_key(&inst.id, &body.event_id, &handle.id))
-        {
+        let key = event_key(&inst.id, &body.event_id, &handle.id);
+        if state.events.contains(&key) {
             results[i] = Some(Status::Duplicate);
             continue;
         }
@@ -312,11 +379,20 @@ pub async fn push(
             results[i] = Some(Status::Limited(left));
             continue;
         }
+        // A device that Apple has never accepted a push for gets a small quota
+        // until one succeeds, so registering junk tokens does not turn the
+        // relay into a way to hammer Apple with them.
+        if !device.verified
+            && let Err(wait) = state.limiters.unverified_device.take(&device.id)
+        {
+            results[i] = Some(Status::Limited(wait));
+            continue;
+        }
         if let Err(wait) = handle_limiter.take(&handle.id) {
             results[i] = Some(Status::Limited(wait));
             continue;
         }
-        if let Err(wait) = device_limiter.has(&device.id, 1).map(|_| ()) {
+        if let Err(wait) = device_limiter.has(&device.id, 1) {
             results[i] = Some(Status::Limited(wait));
             continue;
         }
@@ -325,20 +401,29 @@ pub async fn push(
             results[i] = Some(Status::Unavailable(Some(wait)));
             continue;
         }
+        // Claim the event before sending, so a concurrent request with the same
+        // event id sees `duplicate` instead of sending a second push. A claim
+        // that does not end in `accepted` is released below. A full set drops
+        // its oldest entry rather than stop deduplicating.
+        if !state.events.insert_evicting(key) {
+            results[i] = Some(Status::Duplicate);
+            continue;
+        }
         to_send.push((i, handle, device));
     }
 
     // Send, concurrently, each within the deadline.
-    let msg = Message {
-        kind,
-        reference: body.reference.as_deref(),
-        collapse: body.collapse.as_deref(),
-        ttl_secs: ttl,
-    };
     let sends = to_send.iter().map(|(_, handle, device)| {
-        let (state, msg) = (&state, &msg);
+        let state = &state;
+        let msg = Message {
+            kind,
+            reference: body.reference.as_deref(),
+            collapse: body.collapse.as_deref(),
+            ttl_secs: ttl,
+            scope: &handle.id,
+        };
         async move {
-            tokio::time::timeout(SEND_DEADLINE, deliver(state, device, &handle.tag, msg))
+            tokio::time::timeout(SEND_DEADLINE, deliver(state, device, &handle.tag, &msg))
                 .await
                 .unwrap_or(Status::Unavailable(None))
         }
@@ -350,9 +435,11 @@ pub async fn push(
     for ((i, handle, _), status) in to_send.iter().zip(outcomes) {
         if status == Status::Accepted {
             used.push(handle.id.clone());
-            let _ = state
+        } else {
+            // Not delivered: the same event may be tried again.
+            state
                 .events
-                .insert(event_key(&inst.id, &body.event_id, &handle.id));
+                .remove(&event_key(&inst.id, &body.event_id, &handle.id));
         }
         results[*i] = Some(status);
     }

@@ -21,7 +21,7 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "api": [1],
-        "apns": state.apns.status(),
+        "apns": state.apns_status(),
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }

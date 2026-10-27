@@ -248,6 +248,7 @@ pub struct TestApp {
     pub public_key: Vec<u8>,
     pub settings: Settings,
     pub pem: String,
+    pub runtime_dir: std::path::PathBuf,
     ips: AtomicU32,
 }
 
@@ -268,6 +269,11 @@ impl TestApp {
             limits: Limits {
                 // Four bits keep registration fast in tests.
                 pow_difficulty: 4,
+                // Registering junk devices is rate-limited in production; most
+                // tests are not about that.
+                unverified_device_per_hour: 1000,
+                // Fewer extra bits when many instances register in a test.
+                pow_adaptive_threshold_per_hour: 1000,
                 ..Limits::default()
             },
             proxies: vec![],
@@ -283,6 +289,8 @@ impl TestApp {
 
     async fn from_builder(b: Builder) -> TestApp {
         let (addr, mock) = start_mock().await;
+        let runtime_dir =
+            std::env::temp_dir().join(format!("pp-test-{}", postal_pigeon::util::uuid_v4()));
         let url = format!("http://{addr}");
         let (pem, public_key) = pem_key();
         let settings = Settings {
@@ -308,6 +316,9 @@ impl TestApp {
             hmac_key_file: None,
             seal_key_file: None,
             seal_old_key_files: vec![],
+            allow_no_proxy: true,
+            runtime_dir: runtime_dir.clone(),
+            allow_insecure_apns_urls: true,
         };
         let clock = Clock::new();
         let apns = Apns::from_pem(
@@ -318,7 +329,8 @@ impl TestApp {
             clock.clone(),
         )
         .unwrap()
-        .with_retry_delay(Duration::from_millis(1));
+        .with_retry_delay(Duration::from_millis(1))
+        .with_token_dir(runtime_dir.join("postal-pigeon"));
         let state = AppState::new(
             settings.clone(),
             b.db.unwrap_or_else(|| Db::open_memory().unwrap()),
@@ -334,6 +346,7 @@ impl TestApp {
             public_key,
             settings,
             pem,
+            runtime_dir,
             ips: AtomicU32::new(1),
         }
     }
@@ -374,8 +387,13 @@ impl TestApp {
     }
 
     pub async fn raw(&self, req: Request) -> Resp {
+        self.raw_from("203.0.113.10", req).await
+    }
+
+    /// A hand-made request arriving from `ip`.
+    pub async fn raw_from(&self, ip: &str, req: Request) -> Resp {
         let mut req = req;
-        let peer: SocketAddr = "203.0.113.10:40000".parse().unwrap();
+        let peer: SocketAddr = format!("{ip}:40000").parse().unwrap();
         req.extensions_mut().insert(ConnectInfo(peer));
         self.finish(req).await
     }
@@ -412,7 +430,14 @@ impl TestApp {
     // ---- flows ----
 
     pub async fn challenge(&self) -> (String, u32) {
-        let r = self.get("/v1/challenge").await;
+        self.challenge_from("203.0.113.10").await
+    }
+
+    /// A challenge fetched from the given address.
+    pub async fn challenge_from(&self, ip: &str) -> (String, u32) {
+        let r = self
+            .call_from(ip, "GET", "/v1/challenge", None, None, None)
+            .await;
         assert_eq!(r.status, 200, "{}", r.json);
         (
             r.json["challenge"].as_str().unwrap().to_string(),
@@ -431,8 +456,8 @@ impl TestApp {
 
     /// Registers an instance from a fresh address; returns its credential.
     pub async fn new_instance(&self) -> String {
-        let (c, d) = self.challenge().await;
         let ip = self.next_ip();
+        let (c, d) = self.challenge_from(&ip).await;
         let r = self
             .call_from(
                 &ip,
@@ -541,4 +566,48 @@ pub fn jwt_signature_ok(public_key: &[u8], jwt: &str) -> bool {
     UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, public_key)
         .verify(input.as_bytes(), &sig)
         .is_ok()
+}
+
+impl Drop for TestApp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.runtime_dir);
+    }
+}
+
+/// Log lines written while a test runs.
+#[derive(Clone, Default)]
+pub struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuf {
+    pub fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+/// Starts capturing this thread's log lines through `filter`. Keep the guard
+/// alive for as long as the capture should run.
+pub fn capture_logs(
+    filter: tracing_subscriber::EnvFilter,
+) -> (LogBuf, tracing::subscriber::DefaultGuard) {
+    let buf = LogBuf::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer({
+            let buf = buf.clone();
+            move || buf.clone()
+        })
+        .with_ansi(false)
+        .with_env_filter(filter)
+        .finish();
+    (buf, tracing::subscriber::set_default(sub))
 }

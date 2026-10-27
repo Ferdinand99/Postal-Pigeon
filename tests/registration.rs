@@ -150,11 +150,13 @@ async fn product_and_version_are_validated() {
 }
 
 #[tokio::test]
-async fn registration_is_limited_per_address_and_per_day() {
+async fn registration_is_limited_per_address_and_by_a_safety_cap() {
     let app = TestApp::builder()
         .limits(|l| l.instance_reg_per_day = 7)
         .build()
         .await;
+    // A challenge fetched before the budget is used up.
+    let (spare, spare_d) = app.challenge().await;
     // Five per address per day.
     for _ in 0..5 {
         let (c, d) = app.challenge().await;
@@ -163,18 +165,39 @@ async fn registration_is_limited_per_address_and_per_day() {
             .await;
         assert_eq!(r.status, 201);
     }
-    let (c, d) = app.challenge().await;
-    let r = app
-        .call("POST", "/v1/instances", None, Some(app.registration(&c, d)))
-        .await;
+    // The address is used up: no more challenges for it either.
+    let r = app.get("/v1/challenge").await;
     assert_eq!((r.status.as_u16(), r.error()), (429, "rate_limited"));
     assert!(r.retry_after().unwrap() > 0);
+    // And a challenge it already holds is refused without being burnt...
+    let r = app
+        .call(
+            "POST",
+            "/v1/instances",
+            None,
+            Some(app.registration(&spare, spare_d)),
+        )
+        .await;
+    assert_eq!((r.status.as_u16(), r.error()), (429, "rate_limited"));
+    // ...so the same challenge still works from another address (the limit is
+    // checked before the challenge is remembered).
+    let other = app.next_ip();
+    let r = app
+        .call_from(
+            &other,
+            "POST",
+            "/v1/instances",
+            None,
+            Some(app.registration(&spare, spare_d)),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.json);
 
-    // Another address is fine until the relay-wide daily cap.
+    // One more from another address reaches the relay-wide safety cap (7).
     app.new_instance().await;
-    app.new_instance().await;
-    let (c, d) = app.challenge().await;
     let ip = app.next_ip();
+    let (c, d) = app.challenge_from(&ip).await;
     let r = app
         .call_from(
             &ip,
@@ -191,7 +214,7 @@ async fn registration_is_limited_per_address_and_per_day() {
 
     // Tomorrow it opens again.
     app.clock.advance_secs(DAY_SECS);
-    let (c, d) = app.challenge().await;
+    let (c, d) = app.challenge_from(&ip).await;
     let r = app
         .call_from(
             &ip,
@@ -299,7 +322,7 @@ async fn credentials_are_checked() {
 }
 
 #[tokio::test]
-async fn wrong_credentials_are_limited_per_address() {
+async fn wrong_credentials_are_limited_per_address_but_valid_ones_never_blocked() {
     let app = TestApp::builder()
         .limits(|l| l.auth_failures_per_addr_hour = 3)
         .build()
@@ -312,12 +335,60 @@ async fn wrong_credentials_are_limited_per_address() {
             .await;
         assert_eq!(r.status, 401);
     }
-    // Even the right credential is refused from that address for a while.
+    // The address has used its failures: more wrong ones get 429...
     let r = app
-        .call("POST", "/v1/instances/self/rotate", Some(&cred), None)
+        .call("POST", "/v1/instances/self/rotate", Some(&forged), None)
         .await;
     assert_eq!((r.status.as_u16(), r.error()), (429, "rate_limited"));
     assert!(r.retry_after().is_some());
+    // ...but a request with valid credentials is not held up by them. A flood
+    // of bad Authorization headers behind a shared address can't lock the
+    // good clients out.
+    let r = app
+        .call("POST", "/v1/instances/self/rotate", Some(&cred), None)
+        .await;
+    assert_eq!(r.status, 200, "{}", r.json);
+}
+
+#[tokio::test]
+async fn unknown_ids_are_charged_too() {
+    let app = TestApp::builder()
+        .limits(|l| l.auth_failures_per_addr_hour = 2)
+        .build()
+        .await;
+    let unknown_instance = format!("hrk_{}{}", "B".repeat(11), "C".repeat(43));
+    let unknown_device = "hrd_AAAAAAAAAAAAAAAAAAAAAA";
+    let mut seen = vec![];
+    for _ in 0..2 {
+        let r = app
+            .call(
+                "POST",
+                "/v1/instances/self/rotate",
+                Some(&unknown_instance),
+                None,
+            )
+            .await;
+        seen.push(r.status.as_u16());
+    }
+    let r = app
+        .call(
+            "PUT",
+            &format!("/v1/devices/{unknown_device}"),
+            Some("hrm_x"),
+            Some(json!({})),
+        )
+        .await;
+    seen.push(r.status.as_u16());
+    let r = app
+        .call(
+            "POST",
+            "/v1/instances/self/rotate",
+            Some(&unknown_instance),
+            None,
+        )
+        .await;
+    seen.push(r.status.as_u16());
+    assert_eq!(seen, [401, 401, 429, 429]);
 }
 
 #[tokio::test]
@@ -343,12 +414,16 @@ async fn suspended_instances_are_refused() {
 }
 
 #[tokio::test]
-async fn overload_is_shed_with_503() {
+async fn overload_is_shed_with_503_but_healthz_still_answers() {
     let app = TestApp::builder()
         .limits(|l| l.max_inflight_requests = 0)
         .build()
         .await;
-    let r = app.get("/healthz").await;
+    let r = app.get("/v1/status").await;
     assert_eq!((r.status.as_u16(), r.error()), (503, "overloaded"));
     assert!(r.retry_after().is_some());
+    // /healthz has a pool of its own.
+    let r = app.get("/healthz").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json, "ok");
 }

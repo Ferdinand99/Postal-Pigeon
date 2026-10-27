@@ -158,6 +158,12 @@ pub struct Settings {
     pub hmac_key_file: Option<PathBuf>,
     pub seal_key_file: Option<PathBuf>,
     pub seal_old_key_files: Vec<PathBuf>,
+    /// Start without trusted proxies even though a public URL is set.
+    pub allow_no_proxy: bool,
+    /// Where the relay and the admin commands share the APNs provider token.
+    pub runtime_dir: PathBuf,
+    /// Accept an APNs address that isn't https (tests and staging only).
+    pub allow_insecure_apns_urls: bool,
 }
 
 impl Settings {
@@ -167,6 +173,39 @@ impl Settings {
 
     pub fn env_allowed(&self, env: Env) -> bool {
         self.environments.contains(&env)
+    }
+
+    /// A relay with a public address that trusts no proxy sees every client as
+    /// the proxy itself: one shared set of address limits for the world, which
+    /// one bad actor can use up. Refuse to start like that unless told to.
+    pub fn check_proxy_config(&self) -> Result<(), String> {
+        if self.public_url.is_some() && self.trusted_proxies.is_empty() && !self.allow_no_proxy {
+            return Err(
+                "PP_PUBLIC_URL is set but PP_TRUSTED_PROXIES is empty, so every client would share \
+                 one address and one set of limits. Set PP_TRUSTED_PROXIES to your reverse proxy's \
+                 address as the container sees it (for example 172.18.0.1/32), or set \
+                 PP_ALLOW_NO_PROXY=1 if clients really connect directly."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The APNs addresses must be https, so the provider token and the device
+    /// tokens never travel in clear, unless the tests flag is set.
+    pub fn check_apns_urls(&self) -> Result<(), String> {
+        if self.allow_insecure_apns_urls {
+            return Ok(());
+        }
+        for (name, url) in [
+            ("production", &self.apns_urls.production),
+            ("sandbox", &self.apns_urls.sandbox),
+        ] {
+            if !url.starts_with("https://") {
+                return Err(format!("the APNs {name} address must start with https://"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -236,6 +275,20 @@ pub struct ConfigArgs {
     /// JSON file that overrides any of the limits (see docs/api.md).
     #[arg(long, env = "PP_LIMITS_FILE", global = true)]
     pub limits_file: Option<PathBuf>,
+
+    /// Start although PP_PUBLIC_URL is set and PP_TRUSTED_PROXIES is empty. Every
+    /// client then looks like the proxy and shares one set of limits.
+    #[arg(long, env = "PP_ALLOW_NO_PROXY", action = clap::ArgAction::SetTrue, global = true)]
+    pub allow_no_proxy: bool,
+
+    /// Folder for the shared APNs provider token (default: the system temp
+    /// folder; a tmpfs in the container).
+    #[arg(long, env = "PP_RUNTIME_DIR", global = true)]
+    pub runtime_dir: Option<PathBuf>,
+
+    /// Staging and tests only: allow APNs addresses that are not https.
+    #[arg(long, env = "PP_APNS_ALLOW_INSECURE_URLS", hide = true, action = clap::ArgAction::SetTrue, global = true)]
+    pub apns_allow_insecure_urls: bool,
 
     /// Staging and tests only: another APNs production address.
     #[arg(long, env = "PP_APNS_PRODUCTION_URL", hide = true, global = true)]
@@ -329,6 +382,9 @@ impl ConfigArgs {
             hmac_key_file: self.hmac_key_file,
             seal_key_file: self.seal_key_file,
             seal_old_key_files: self.seal_old_key_files,
+            allow_no_proxy: self.allow_no_proxy,
+            runtime_dir: self.runtime_dir.unwrap_or_else(std::env::temp_dir),
+            allow_insecure_apns_urls: self.apns_allow_insecure_urls,
         })
     }
 }
@@ -337,6 +393,53 @@ impl ConfigArgs {
 mod tests {
     use super::*;
 
+    fn settings() -> Settings {
+        Settings {
+            bind: "127.0.0.1:3010".parse().unwrap(),
+            data_dir: "data".into(),
+            public_url: None,
+            apps: vec![],
+            environments: vec![Env::Production],
+            apns: None,
+            apns_urls: ApnsUrls::default(),
+            trusted_proxies: vec![],
+            limits: Limits::default(),
+            hmac_key_file: None,
+            seal_key_file: None,
+            seal_old_key_files: vec![],
+            allow_no_proxy: false,
+            runtime_dir: "/tmp".into(),
+            allow_insecure_apns_urls: false,
+        }
+    }
+
+    #[test]
+    fn a_public_relay_needs_trusted_proxies() {
+        let mut s = settings();
+        assert!(s.check_proxy_config().is_ok(), "no public URL: fine");
+        s.public_url = Some("https://pigeon.example.com".into());
+        let err = s.check_proxy_config().unwrap_err();
+        assert!(err.contains("PP_TRUSTED_PROXIES") && err.contains("PP_ALLOW_NO_PROXY"));
+        s.allow_no_proxy = true;
+        assert!(s.check_proxy_config().is_ok());
+        s.allow_no_proxy = false;
+        s.trusted_proxies = vec![IpNet::parse("172.18.0.1/32").unwrap()];
+        assert!(s.check_proxy_config().is_ok());
+    }
+
+    #[test]
+    fn apns_addresses_must_be_https() {
+        let mut s = settings();
+        assert!(s.check_apns_urls().is_ok());
+        s.apns_urls.sandbox = "http://127.0.0.1:9999".into();
+        assert!(s.check_apns_urls().unwrap_err().contains("sandbox"));
+        s.allow_insecure_apns_urls = true;
+        assert!(s.check_apns_urls().is_ok());
+        s.allow_insecure_apns_urls = false;
+        s.apns_urls.sandbox = "https://api.sandbox.push.apple.com".into();
+        s.apns_urls.production = "ftp://x".into();
+        assert!(s.check_apns_urls().unwrap_err().contains("production"));
+    }
     #[test]
     fn parses_apps() {
         let a = AppConfig::parse("hedgerow=tools.hedgerow.app").unwrap();

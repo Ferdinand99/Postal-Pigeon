@@ -8,7 +8,9 @@
 #   sudo chown 1000:1000 secrets/*; sudo chmod 0400 secrets/*
 services:
   postal-pigeon:
-    image: ghcr.io/ferdinand99/postal-pigeon:latest
+    # Pin a released version; update it deliberately (and read the release notes)
+    # rather than following :latest.
+    image: ghcr.io/ferdinand99/postal-pigeon:0.1.0
     # build: .   # build from this checkout instead of pulling the image
     container_name: postal-pigeon
     restart: unless-stopped
@@ -29,17 +31,23 @@ services:
       - PP_SEAL_KEY_FILE=/run/secrets/seal.key
       - PP_HMAC_KEY_FILE=/run/secrets/hmac.key
       - PP_PUBLIC_URL=https://pigeon.example.com
-      # The proxy's address as the container sees it (the Docker bridge's
-      # gateway for a proxy on the host). Only these are believed about
-      # X-Forwarded-For.
-      - PP_TRUSTED_PROXIES=172.16.0.0/12
-      # - RUST_LOG=info
+      # ONE address: the reverse proxy as the container sees it. The network
+      # below is fixed so that, for a proxy on the host, it is the bridge gateway
+      # 172.30.16.1. Only this address is believed about X-Forwarded-For; a wide
+      # network here would let anyone on it pick their own client address. The
+      # relay refuses to start without it (PP_ALLOW_NO_PROXY=1 overrides).
+      - PP_TRUSTED_PROXIES=172.30.16.1/32
+      # - RUST_LOG=info   # sets the relay's own level only
     # Hardening (docs/design.md section 11): no root, no capabilities, nothing
     # writable but the data volume.
     user: "1000:1000"
     read_only: true
     tmpfs:
       - /tmp
+    # A runaway relay can not take the host with it.
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 200
     cap_drop:
       - ALL
     security_opt:
@@ -53,3 +61,9 @@ services:
 
 volumes:
   pigeon-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.16.0/24
