@@ -77,13 +77,24 @@ docker compose up -d
 ```
 
 [`docker-compose.yml`](docker-compose.yml) publishes the relay on `127.0.0.1:3016` only, mounts the keys read-only,
-and runs the container as an unprivileged user with a read-only root filesystem and no capabilities. Point your
-reverse proxy at it; it must terminate TLS (1.2 or higher), set HSTS, and add the client address to
-`X-Forwarded-For`. Set `PP_TRUSTED_PROXIES` to the proxy's address as the container sees it, since the relay believes
-that header from nobody else. Keep proxy access logs for at most seven days (design section 9). Images are published
-for `linux/amd64` and `linux/arm64`.
+and runs the container as an unprivileged user with a read-only root filesystem, no capabilities and memory, CPU and
+process limits. The relay refuses to start if a key file can be read by other users (use mode 0400), if the seal and
+HMAC keys are the same, or if the APNs address is not https.
 
-Check it with `curl https://your-host/healthz` (answers `ok`) and `curl https://your-host/v1/status`.
+Point your reverse proxy at it; it must terminate TLS (1.2 or higher), set HSTS, and add the client address to
+`X-Forwarded-For`. **Set `PP_TRUSTED_PROXIES` to the proxy's one address as the container sees it** (the compose file
+fixes the network so that this is `172.30.16.1/32`, and recommends nothing wider). Every address limit is per client
+address; if the proxy is not trusted, all clients look like the proxy and share one set of limits, so the relay refuses to
+start with `PP_PUBLIC_URL` set and no trusted proxy (`PP_ALLOW_NO_PROXY=1` overrides that), and it logs a warning (at
+most once an hour) when a peer that is not trusted sends `X-Forwarded-For`. Keep proxy access logs for at most seven
+days (design section 9). Images are published for `linux/amd64` and `linux/arm64`; pin the version tag in the compose
+file.
+
+Check it with `curl https://your-host/healthz` (answers `ok`) and `curl https://your-host/v1/status`. **Then run
+`docker compose exec postal-pigeon postal-pigeon admin check-apns`**: it asks Apple about the key, the team and the bundle
+id of every app and environment, using a made-up device token, and says plainly what is wrong (a rejected provider
+token, a rejected topic). It changes nothing. A wrong environment can only be told with a real device, so also run
+`admin send-test` against your own phone.
 
 ## Configure
 
@@ -99,9 +110,11 @@ Everything is an environment variable with the `PP_` prefix (or the matching fla
 | `PP_BIND` | Listen address; default `127.0.0.1:3010` (the image uses `0.0.0.0:3010`). |
 | `PP_DATA_DIR` | Folder for the database (`pigeon.sqlite`); default `data` (`/data` in the image). |
 | `PP_PUBLIC_URL` | The public address, for logs. |
-| `PP_TRUSTED_PROXIES` | Addresses or networks whose `X-Forwarded-For` is believed. |
+| `PP_TRUSTED_PROXIES` | The reverse proxy's address (one `/32`), whose `X-Forwarded-For` is believed. Required when `PP_PUBLIC_URL` is set. |
+| `PP_ALLOW_NO_PROXY` | `1` to start with a public URL and no trusted proxy (clients connecting directly). |
+| `PP_RUNTIME_DIR` | Where the relay and the `admin` commands share the Apple provider token (default: the system temp folder, a tmpfs in the container). Apple limits how often a new token may be made, so they must not each make one. |
 | `PP_LIMITS_FILE` | JSON file overriding any limit ([`docs/api.md`](docs/api.md#limits)). |
-| `RUST_LOG` | Log level; default `info`. |
+| `RUST_LOG` | The relay's own log level, `error` to `trace`; default `info`. Other crates stay at `warn` whatever it says, because at lower levels they log request details. |
 
 The relay logs start-up, errors with short codes and aggregate counters. It never logs tokens, handles, credentials,
 `ref` values, event ids or client addresses.
@@ -118,10 +131,11 @@ docker compose exec postal-pigeon postal-pigeon admin unblock-instance <id>
 docker compose exec postal-pigeon postal-pigeon admin set-tier <id> established
 docker compose exec postal-pigeon postal-pigeon admin delete-instance <id>
 docker compose exec postal-pigeon postal-pigeon admin delete-device <hrd_...>
+docker compose exec postal-pigeon postal-pigeon admin check-apns
 docker compose exec postal-pigeon postal-pigeon admin send-test --device <hrh_... or hrd_...>
 ```
 
-`send-test` pushes a test alert (or `--kind sync`) to a registered device, ignoring rate limits, and says what Apple
+`check-apns` is described above. `send-test` pushes a test alert (or `--kind sync`) to a registered device, ignoring rate limits, and says what Apple
 answered. Use it after changing the APNs key.
 
 - **Rotating the APNs key:** create a second key at Apple, change `PP_APNS_KEY_PATH` and `PP_APNS_KEY_ID`, restart,

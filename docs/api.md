@@ -13,6 +13,9 @@ This is the reference for people who write an app or a server that uses the rela
 - Secrets are random and prefixed so a leaked one is recognisable: `hrk_` (instance credential), `hrd_` (device id, not
   secret), `hrm_` (manage key), `hrh_` (handle). The relay stores only their SHA-256.
 - No response ever contains a device token.
+- A wrong or unknown credential is charged to the caller's address (60 an hour by default) and answers `429` once the
+  address has used them up; a request with valid credentials is never held up by that, so clients behind a shared address
+  are not locked out by someone else's bad requests.
 
 | Error code | Status | Meaning |
 |---|---|---|
@@ -33,7 +36,9 @@ This is the reference for people who write an app or a server that uses the rela
 - `GET /healthz` answers `200 ok` when the process is up and the database answers, else `503`. Nothing else is revealed.
   This is what Vigilant Vole and the container health check use.
 - `GET /v1/status` answers `{"api": [1], "apns": "ok" | "degraded" | "unknown", "version": "..."}`. `apns` reflects
-  recent real sends, not a call to Apple.
+  recent real sends, not a call to Apple. `degraded` means the relay's own access to Apple is in trouble (the provider
+  token or topic is refused, Apple told the relay to back off, or too many devices answered "bad token" at once, which
+  pauses deleting devices), not that your push failed.
 
 ## Instances (self-hosted servers)
 
@@ -46,7 +51,10 @@ lower limits.
 { "challenge": "...", "difficulty": 20, "expires_at": "2026-10-27T12:05:00Z" }
 ```
 
-The challenge is valid for five minutes and works once.
+The challenge is valid for five minutes and works once. `difficulty` is the number of leading zero bits to find and **rises
+with recent registration volume** (the relay asks for more work when many instances register within an hour); it is
+fixed when the challenge is issued, so use the value in the response. An address or network that has used up its daily
+registrations gets `429` here instead of a challenge.
 
 ### `POST /v1/instances`
 
@@ -154,10 +162,10 @@ Revokes one handle at once; the relay then answers `gone` for it. `204`, or `404
 | Field | Rule |
 |---|---|
 | `event_id` | Required, a UUID. A push Apple accepted is not sent again for the same instance, event and handle within 15 minutes (`duplicate`). A push that failed can be retried with the same id. |
-| `handles` | 1 to 25 handles. The same push goes to all. |
+| `handles` | 1 to 25 handles. The same push goes to all. A handle listed twice is sent once; the repeat answers `duplicate`. |
 | `kind` | `alert`: a visible notification with fixed, generic text from the app. `sync`: a silent "fetch now". Which kinds an app may use is set on the relay. |
 | `ref` | Optional opaque id, at most 64 of `A-Z a-z 0-9 _ -`. Use random ids, not counters. |
-| `collapse` | Optional, at most 32 of the same characters. For alerts, pushes with the same value replace each other at Apple. (Syncs collapse per handle.) |
+| `collapse` | Optional, at most 32 of the same characters. For alerts, pushes from the same handle with the same value replace each other at Apple. Apple sees only a keyed hash of the handle and the value, so another server (another handle) can never replace your alerts by choosing the same value. (Syncs collapse per handle.) |
 | `ttl` | Optional seconds to keep trying, 60 to 86400. Defaults: alert 3600, sync 900. |
 
 `200`, with one result per handle, in order:
@@ -171,14 +179,18 @@ Revokes one handle at once; the relay then answers `gone` for it. `204`, or `404
 | `accepted` | Apple took the push. This is not a promise that the device got it. |
 | `duplicate` | This `event_id` was already sent to that handle. Nothing was sent. |
 | `gone` | The handle is unknown, revoked, or its device is no longer valid. **Forget the handle.** The answer is the same for "never existed" and "revoked". |
-| `limited` | A limit applies to this handle or device. Retry no sooner than `retry_after` seconds, or drop the push. |
-| `unavailable` | Apple or the relay could not deliver now. A retry later may work. `retry_after` may be present. |
+| `limited` | A limit applies to this handle or device (or to a device Apple has asked the relay to back off from). Retry no sooner than `retry_after` seconds, or drop the push. |
+| `unavailable` | Apple or the relay could not deliver now. A retry later may work. `retry_after` is present when Apple has told the whole relay to pause (then nothing is sent to anyone until then). |
 | `unsupported_kind` | The device's app does not accept this `kind` (for example `alert` for Faithful Ferret). Treat unknown statuses as `unavailable`. |
 
 Whole-request failures: `400 invalid_request`, `401 invalid_credentials` or `unknown_instance`, `403 suspended`,
-`413 too_large`, `429 rate_limited` (the instance's hourly limit, or more than 20 unknown handles in an hour, which also
-flags the instance for review), `503 overloaded`. The relay calls Apple while you wait and answers within about five
-seconds. There is no queue: send in a background task and give up when the push would have expired.
+`413 too_large`, `429 rate_limited`, `503 overloaded`. A `429` is the instance's hourly limit, or too many unknown
+handles: an instance may present at most 20 handles per hour that do not exist (or are revoked). **If a request holds more
+unknown handles than the instance has left of that allowance, the whole request is refused with `429` and nothing in it
+is sent** (the unknown ones are what is counted, but the refusal is all or nothing, and the instance is flagged for
+review). Forget handles that answered `gone` so they are not presented again. The relay calls Apple while you wait and
+answers within about five seconds. There is no queue: send in a background task and give up when the push would have
+expired.
 
 ### What the push contains
 
@@ -196,8 +208,9 @@ The numbers below are the defaults (design section 10) and can be changed by the
 
 | Limit | Default |
 |---|---|
-| Instance registration | proof of work (`pow_difficulty`, 20 bits); `instance_reg_per_addr_day` 5 per address (IPv6 /64); `instance_reg_per_day` 200 relay-wide |
-| Device registration | `device_reg_per_addr_hour` 20, `device_reg_per_addr_day` 100 per address; `max_devices` 1,000,000 rows |
+| Instance registration | proof of work (`pow_difficulty`, 20 bits, plus up to `pow_adaptive_max_extra_bits` = 8 more: one bit for each doubling of the last hour's registrations above `pow_adaptive_threshold_per_hour` = 30); `instance_reg_per_addr_day` 5 per address (IPv6 /64); `instance_reg_per_prefix_day` 25 per network (IPv4 /24, IPv6 /48); `instance_reg_per_day` 5000 relay-wide, as a safety cap only |
+| Device registration | `device_reg_per_addr_hour` 20, `device_reg_per_addr_day` 100 per address; `device_reg_per_prefix_hour` 100, `device_reg_per_prefix_day` 500 per network; `max_devices` 1,000,000 rows (registering a known token is always allowed) |
+| Devices Apple never accepted | `unverified_device_per_hour` 3 sends per hour, until the first push is accepted |
 | Handles | `handle_create_per_device_hour` 10, `max_handles_per_device` 32 |
 | Device updates | `device_update_per_hour` 20 per device |
 | Send per handle | alert `alert_per_handle_hour` 6 (burst `alert_handle_burst` 3); sync `sync_per_handle_hour` 30 (burst `sync_handle_burst` 5) |
@@ -207,7 +220,8 @@ The numbers below are the defaults (design section 10) and can be changed by the
 | Auto-suspension | more than `auto_suspend_throttled_per_day` = 1000 `429`s in a day |
 | Wrong credentials per address | `auth_failures_per_addr_hour` 60 |
 | Toward Apple | `app_sends_per_second` 100 per app (burst twice that) |
-| Other | `max_handles_per_request` 25, `challenge_ttl_secs` 300, `max_tracked_keys` 100,000 per limiter, `max_inflight_requests` 2048 |
+| Strike breaker | `strike_trip_devices` 10 devices answering `BadDeviceToken` and the like within `strike_window_secs` 600, making up `strike_trip_percent` 50 of an app's answers, stop all striking and deleting for `strike_trip_secs` 3600 |
+| Other | `max_handles_per_request` 25, `challenge_ttl_secs` 300, `max_tracked_keys` 100,000 per limiter (the least recently used are dropped when full), `max_inflight_requests` 2048 (plus `health_inflight_requests` 16 for `/healthz` only), `max_connections` 4096, `header_read_timeout_secs` 10 |
 
 ## Versioning
 

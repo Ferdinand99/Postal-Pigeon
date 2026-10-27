@@ -678,3 +678,44 @@ written, and [`api.md`](api.md) is the reference.
 - **Not in version 1:** signed images and reproducible builds (the image is built in CI from the tagged source), the
   OpenAPI description and conformance suite (section 15), Critical Alerts, and a public abuse-contact address in the
   service itself.
+
+### Hardening after the October 2026 review
+
+Changes made to the implementation after a security review of the first version. They tighten the design and do not
+change the API's shape.
+
+- **Client address (sections 10, 12).** The relay refuses to start with a public URL and no trusted proxy
+  (`PP_ALLOW_NO_PROXY=1` overrides), and warns, at most once an hour, when a peer that is not trusted sends
+  `X-Forwarded-For`. Every `X-Forwarded-For` line counts, read from the right, skipping trusted proxies. The compose file
+  fixes its network and trusts one `/32`. A request with valid credentials is never held up by the failed-credential
+  limit; wrong and unknown ids are charged to the address.
+- **Registration pressure (section 6.1, 10).** The hard relay-wide cap of 200 registrations a day is replaced by a
+  per-network limit (IPv4 /24, IPv6 /48; 25 a day) and a proof of work whose difficulty rises one bit for each doubling
+  of the last hour's registrations above 30 (up to 8 extra bits). The difficulty is inside the signed challenge. The
+  relay-wide cap stays as a safety net at 5000. Address limits are checked before a challenge is remembered, and
+  `GET /v1/challenge` refuses an address that has used its budget. Device registration also has a per-network bucket, and
+  registering a token the relay already holds is allowed when the table is full.
+- **Unverified devices and the strike breaker (section 8).** A device Apple has never accepted a push for may be sent to
+  3 times an hour until one succeeds. `BadDeviceToken` and similar answers are watched per app: when 10 devices answer
+  that way within 10 minutes and they are half of the app's answers, nothing is struck or deleted for an hour,
+  `/v1/status` says `degraded` and the log says why. `BadTopic` and `TopicDisallowed` are configuration errors, never
+  a strike. `admin check-apns` asks Apple about the key, team and topic with a made-up device token and changes nothing.
+- **Relay-wide answers from Apple (section 8).** `TooManyProviderTokenUpdates`, and any 429 with a reason other than
+  `TooManyRequests`, pause all sends. The provider token is shared between the relay and the `admin` commands through a
+  file (mode 0600) in a runtime folder (a tmpfs in the container), under a file lock, so they never make more tokens than
+  Apple allows. The reason strings follow Apple's "Handling notification responses from APNs".
+- **Storage (section 9).** Re-sealing is a compare-and-swap, so it can't overwrite a token the app rotated meanwhile.
+  `secure_delete` is on and the write-ahead log is truncated hourly, so deleted tokens and handles don't linger in free
+  pages or the log.
+- **Pushes (sections 6.4, 8).** Alert collapse ids are a keyed hash of the handle and the instance's value, so two
+  servers sharing a device can't replace each other's alerts. A handle listed twice in a request is sent once. An event is
+  claimed before it is sent, so concurrent requests with one `event_id` send once, and a full set drops its oldest entry
+  instead of turning off. A request with more unknown handles than the allowance is refused whole (documented in
+  `api.md`).
+- **Serving (section 12).** The relay uses `hyper` directly because `axum::serve` sets no header-read or idle timeout:
+  each request's headers must arrive within 10 seconds, which also ends idle keep-alive connections, and at most 4096
+  connections are open. `/healthz` has its own small pool of permits, so it answers while other requests are shed.
+- **Secrets and logs (section 11).** Key files that other users can read are refused (mode 0400 or 0600), the seal and
+  HMAC keys must differ, key material is wiped from memory after loading, APNs addresses must be https (a hidden
+  test-only flag aside), and `RUST_LOG` only sets the relay's own level: other crates stay at `warn`, the provider token's
+  header is marked sensitive, so no log level prints the token or a device token.
