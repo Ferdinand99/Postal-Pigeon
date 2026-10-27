@@ -663,7 +663,7 @@ written, and [`api.md`](api.md) is the reference.
   in-memory "already sent" set stores a hash of (instance, event, handle) for 15 minutes, and only for pushes Apple
   accepted, so a failed push can be retried with the same `event_id`.
 - **Additions to the API:** result status `unsupported_kind` (a device's app does not accept that `kind`; clients treat
-  unknown statuses as `unavailable`), error codes `registration_closed`, `limit_reached` and the challenge errors
+  unknown statuses as `unavailable`), error codes `limit_reached` and the challenge errors
   `invalid_challenge`, `challenge_expired`, `challenge_used`, `invalid_proof`. A wrong credential also counts against
   the caller's address (60 per hour) so keys can't be guessed.
 - **Storage additions:** `devices.token_set_ms` is the moment a token was registered, to the millisecond, because the
@@ -689,14 +689,18 @@ change the API's shape.
   `X-Forwarded-For`. Every `X-Forwarded-For` line counts, read from the right, skipping trusted proxies. The compose file
   fixes its network and trusts one `/32`. A request with valid credentials is never held up by the failed-credential
   limit; wrong and unknown ids are charged to the address.
-- **Registration pressure (section 6.1, 10).** The hard relay-wide cap of 200 registrations a day is replaced by a
+- **Registration pressure (section 6.1, 10).** The hard relay-wide cap of 200 registrations a day is gone: registration is never
+  closed to everybody. It is replaced by a
   per-network limit (IPv4 /24, IPv6 /48; 25 a day) and a proof of work whose difficulty rises one bit for each doubling
   of the last hour's registrations above 30 (up to 8 extra bits). The difficulty is inside the signed challenge. The
-  relay-wide cap stays as a safety net at 5000. Address limits are checked before a challenge is remembered, and
+  Above a high-water mark of 5000 registrations a day the proof of work gets 4 more bits, `/v1/status` says
+  `"registration": "busy"` and the log warns every hour. Address limits are checked before a challenge is remembered, and
   `GET /v1/challenge` refuses an address that has used its budget. Device registration also has a per-network bucket, and
   registering a token the relay already holds is allowed when the table is full.
 - **Unverified devices and the strike breaker (section 8).** A device Apple has never accepted a push for may be sent to
-  3 times an hour until one succeeds. `BadDeviceToken` and similar answers are watched per app: when 10 devices answer
+  3 times an hour until one succeeds. `BadDeviceToken` and similar answers about devices that have worked before are
+  watched per app (unverified junk is neither counted nor protected: it is struck and deleted as usual): when 10 devices,
+  for at least 3 different instances, answer
   that way within 10 minutes and they are half of the app's answers, nothing is struck or deleted for an hour,
   `/v1/status` says `degraded` and the log says why. `BadTopic` and `TopicDisallowed` are configuration errors, never
   a strike. `admin check-apns` asks Apple about the key, team and topic with a made-up device token and changes nothing.
@@ -709,7 +713,8 @@ change the API's shape.
   pages or the log.
 - **Pushes (sections 6.4, 8).** Alert collapse ids are a keyed hash of the handle and the instance's value, so two
   servers sharing a device can't replace each other's alerts. A handle listed twice in a request is sent once. An event is
-  claimed before it is sent, so concurrent requests with one `event_id` send once, and a full set drops its oldest entry
+  claimed before it is sent, so concurrent requests with one `event_id` send once, a claim is released unless the push was
+  accepted (also when the request is cancelled mid-send), and a full set drops its oldest entry in constant time
   instead of turning off. A request with more unknown handles than the allowance is refused whole (documented in
   `api.md`).
 - **Serving (section 12).** The relay uses `hyper` directly because `axum::serve` sets no header-read or idle timeout:

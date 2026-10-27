@@ -9,7 +9,11 @@
 services:
   postal-pigeon:
     # Pin a released version; update it deliberately (and read the release notes)
-    # rather than following :latest.
+    # rather than following :latest. 0.1.0 is the first release: release-please
+    # starts from 0.0.0 (Cargo.toml and .release-please-manifest.json) and the
+    # v1 work is a feat, so its release PR is 0.1.0 and the image tag is 0.1.0
+    # (initial-version in release-please-config.json says the same). The tag
+    # exists once that release PR is merged.
     image: ghcr.io/ferdinand99/postal-pigeon:0.1.0
     # build: .   # build from this checkout instead of pulling the image
     container_name: postal-pigeon
