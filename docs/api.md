@@ -33,6 +33,7 @@ This is the reference for people who write an app or a server that uses the rela
 ## Health and status
 
 - `GET /healthz` answers `200 ok` when the process is up and the database answers, else `503`. Nothing else is revealed.
+  `GET /` answers the same, for reverse proxies that health-check `/` by default.
   This is what Vigilant Vole and the container health check use.
 - `GET /v1/status` answers `{"api": [1], "apns": "ok" | "degraded" | "unknown", "version": "..."}`. `apns` reflects
   recent real sends, not a call to Apple. `degraded` means the relay's own access to Apple is in trouble (the provider
@@ -221,7 +222,7 @@ The numbers below are the defaults (design section 10) and can be changed by the
 | Wrong credentials per address | `auth_failures_per_addr_hour` 60 |
 | Toward Apple | `app_sends_per_second` 100 per app (burst twice that) |
 | Strike breaker | `strike_trip_devices` 10 devices that have had a push accepted before, on behalf of at least `strike_trip_instances` 3 different instances, answering `BadDeviceToken` and the like within `strike_window_secs` 600, making up `strike_trip_percent` 50 of an app's answers, stop all striking and deleting for `strike_trip_secs` 3600 |
-| Other | `max_handles_per_request` 25, `challenge_ttl_secs` 300, `max_tracked_keys` 100,000 per limiter (the least recently used are dropped when full), `max_inflight_requests` 2048 (plus `health_inflight_requests` 16 for `/healthz` only), `max_connections` 4096, `header_read_timeout_secs` 10 |
+| Other | `max_handles_per_request` 25, `challenge_ttl_secs` 300, `max_tracked_keys` 100,000 per limiter (the least recently used are dropped when full), `max_inflight_requests` 2048 (plus `health_inflight_requests` 16 for `/` and `/healthz` only), `max_connections` 4096, `header_read_timeout_secs` 10 |
 
 ## Versioning
 

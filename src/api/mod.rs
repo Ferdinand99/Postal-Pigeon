@@ -33,6 +33,9 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The whole API as a router.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        // `/` answers like `/healthz`: reverse proxies (Pangolin among them)
+        // health-check `/` unless told otherwise.
+        .route("/", get(status::healthz))
         .route("/healthz", get(status::healthz))
         .route("/v1/status", get(status::status))
         .route("/v1/challenge", get(instances::challenge))
@@ -65,9 +68,9 @@ async fn not_found() -> ApiError {
 
 /// Sheds load beyond the in-flight limit and sets headers on every answer.
 async fn guard(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    // /healthz has a small pool of its own, so it keeps answering while the
-    // rest is being shed.
-    let pool = if req.uri().path() == "/healthz" {
+    // The health check has a small pool of its own, so it keeps answering
+    // while the rest is being shed.
+    let pool = if matches!(req.uri().path(), "/" | "/healthz") {
         &state.health_inflight
     } else {
         &state.inflight

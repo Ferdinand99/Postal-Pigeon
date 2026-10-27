@@ -776,3 +776,13 @@ async fn a_cancelled_request_does_not_leave_its_event_claimed() {
     let r = w.app.push_body(&w.cred, body).await;
     assert_eq!(TestApp::status_of(&r, 0), "duplicate");
 }
+
+#[tokio::test]
+async fn the_root_answers_like_healthz_for_proxy_health_checks() {
+    let app = TestApp::new().await;
+    for path in ["/", "/healthz"] {
+        let r = app.get(path).await;
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(r.json, "ok", "{path}");
+    }
+}
