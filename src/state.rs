@@ -178,6 +178,8 @@ pub struct Inner {
     pub health_inflight: Arc<Semaphore>,
     /// Instance registrations in the last hour (drives the adaptive proof of work).
     pub registrations: RecentCounter,
+    /// Instances registered today (day, count), for the high-water mark.
+    registered_today: Mutex<(i64, u32)>,
     /// Pauses striking and deleting when many devices answer badly at once.
     pub guard: StrikeGuard,
     /// When the last "X-Forwarded-For from an untrusted peer" warning was logged (ms).
@@ -206,10 +208,12 @@ impl AppState {
             inflight: Arc::new(Semaphore::new(limits.max_inflight_requests)),
             health_inflight: Arc::new(Semaphore::new(limits.health_inflight_requests)),
             registrations: RecentCounter::new(&clock),
+            registered_today: Mutex::new((i64::MIN, 0)),
             guard: StrikeGuard::new(
                 &clock,
                 limits.strike_window_secs,
                 limits.strike_trip_devices,
+                limits.strike_trip_instances,
                 limits.strike_trip_percent,
                 limits.strike_trip_secs,
             ),
@@ -232,11 +236,57 @@ impl AppState {
         }
     }
 
-    /// The proof-of-work difficulty to ask for now.
+    /// The proof-of-work difficulty to ask for now: the base, plus bits for the
+    /// last hour's registration volume, plus more bits above the day's
+    /// high-water mark.
     pub fn current_difficulty(&self) -> u32 {
-        self.settings
-            .limits
-            .difficulty_for(self.registrations.last_hour())
+        let l = &self.settings.limits;
+        let extra = if self.registration_busy() {
+            l.pow_high_water_extra_bits
+        } else {
+            0
+        };
+        l.difficulty_for(self.registrations.last_hour()) + extra
+    }
+
+    /// Whether today's registrations are above the high-water mark.
+    pub fn registration_busy(&self) -> bool {
+        let today = self.clock.today();
+        let (day, count) = *self
+            .registered_today
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        day == today && count >= self.settings.limits.instance_reg_high_water_per_day
+    }
+
+    /// Counts a new instance. Logs, once, when the day's high-water mark is
+    /// crossed.
+    pub fn note_registration(&self) {
+        self.registrations.record();
+        let today = self.clock.today();
+        let mut guard = self
+            .registered_today
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.0 != today {
+            *guard = (today, 0);
+        }
+        guard.1 = guard.1.saturating_add(1);
+        if guard.1 == self.settings.limits.instance_reg_high_water_per_day {
+            tracing::error!(
+                registrations = guard.1,
+                "registration_high_water: many instances registered today; the proof of work is \
+                 harder until tomorrow. Look at `admin instances` for a flood."
+            );
+        }
+    }
+
+    /// Sets today's count from the database at start-up.
+    pub fn set_registrations_today(&self, count: u32) {
+        *self
+            .registered_today
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (self.clock.today(), count);
     }
 
     /// Logs, at most once an hour, that a peer we do not trust sent

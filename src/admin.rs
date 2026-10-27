@@ -174,6 +174,7 @@ pub async fn run(state: &AppState, cmd: AdminCommand) -> Result<String, String> 
                     collapse: None,
                     ttl_secs: default_ttl_secs(kind),
                     scope: &dev.id,
+                    instance: "admin",
                 },
             )
             .await;

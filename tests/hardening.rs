@@ -312,36 +312,59 @@ async fn a_device_apple_never_accepted_gets_a_small_quota_until_one_succeeds() {
 
 // ---- PP-07, PP-08: Apple's answers about the relay itself -----------------
 
-#[tokio::test]
-async fn many_devices_answering_badly_at_once_stop_the_striking() {
-    let app = TestApp::builder()
-        .limits(|l| {
-            l.strike_trip_devices = 4;
-            l.strike_trip_percent = 50;
-        })
-        .build()
-        .await;
-    let cred = app.new_instance().await;
-    let mut devices = vec![];
-    for i in 1..=6u8 {
+/// Registers `n` devices with a handle each. With `verified`, one push to each
+/// is accepted first, so Apple has taken a push for them.
+async fn devices(app: &TestApp, n: u8, verified: bool, creds: &[String]) -> Vec<(Device, Handle)> {
+    let mut out = vec![];
+    for i in 1..=n {
         let t = token(i);
         let dev = app.new_device(&t).await;
         let h = app.new_handle(&dev).await;
+        if verified {
+            let r = app
+                .push(&creds[i as usize % creds.len()], &[&h.secret], "sync")
+                .await;
+            assert_eq!(TestApp::status_of(&r, 0), "accepted");
+        }
         app.mock.script(
             &t,
             (0..3)
                 .map(|_| Reply::reason(400, "BadDeviceToken"))
                 .collect(),
         );
-        devices.push((dev, h));
+        out.push((dev, h));
     }
-    assert_eq!(app.get("/v1/status").await.json["apns"], "unknown");
-    for _round in 0..3 {
-        for (_, h) in &devices {
-            let r = app.push(&cred, &[&h.secret], "sync").await;
-            assert_eq!(TestApp::status_of(&r, 0), "unavailable");
+    out
+}
+
+/// Three rounds of pushes to every device, from rotating instances.
+async fn rounds(app: &TestApp, devices: &[(Device, Handle)], creds: &[String]) {
+    for round in 0..3 {
+        for (k, (_, h)) in devices.iter().enumerate() {
+            let cred = &creds[(k + round) % creds.len()];
+            let r = app.push(cred, &[&h.secret], "sync").await;
+            assert_ne!(TestApp::status_of(&r, 0), "accepted");
         }
     }
+}
+
+#[tokio::test]
+async fn many_working_devices_from_several_instances_answering_badly_stop_the_striking() {
+    let app = TestApp::builder()
+        .limits(|l| {
+            l.strike_trip_devices = 4;
+            l.strike_trip_percent = 40;
+        })
+        .build()
+        .await;
+    let creds = vec![
+        app.new_instance().await,
+        app.new_instance().await,
+        app.new_instance().await,
+    ];
+    let devices = devices(&app, 6, true, &creds).await;
+    assert_ne!(app.get("/v1/status").await.json["apns"], "degraded");
+    rounds(&app, &devices, &creds).await;
     // Without the breaker every device would have been struck three times and
     // deleted. With it, none is.
     for (dev, _) in &devices {
@@ -351,11 +374,64 @@ async fn many_devices_answering_badly_at_once_stop_the_striking() {
     let ratios = app.state.guard.ratios();
     assert_eq!(ratios.len(), 1);
     assert_eq!(ratios[0].app, "hedgerow");
-    assert!(ratios[0].bad_devices >= 4, "{ratios:?}");
+    assert!(
+        ratios[0].bad_devices >= 4 && ratios[0].bad_instances >= 3,
+        "{ratios:?}"
+    );
 
     // It closes by itself after an hour, and striking works again.
     app.clock.advance_secs(3601);
     assert_ne!(app.get("/v1/status").await.json["apns"], "degraded");
+}
+
+#[tokio::test]
+async fn only_one_or_two_instances_cannot_trip_the_breaker() {
+    let app = TestApp::builder()
+        .limits(|l| {
+            l.strike_trip_devices = 4;
+            l.strike_trip_percent = 40;
+        })
+        .build()
+        .await;
+    let creds = vec![app.new_instance().await, app.new_instance().await];
+    let devices = devices(&app, 6, true, &creds).await;
+    rounds(&app, &devices, &creds).await;
+    assert!(!app.state.guard.is_tripped());
+    assert_ne!(app.get("/v1/status").await.json["apns"], "degraded");
+    // So the bad tokens were struck and deleted as normal.
+    for (dev, _) in &devices {
+        assert!(!app.device_exists(&dev.id).await);
+    }
+}
+
+#[tokio::test]
+async fn a_flood_of_junk_devices_never_trips_the_breaker_and_is_cleaned_up() {
+    let app = TestApp::builder()
+        .limits(|l| {
+            l.strike_trip_devices = 4;
+            l.strike_trip_percent = 40;
+        })
+        .build()
+        .await;
+    let creds = vec![
+        app.new_instance().await,
+        app.new_instance().await,
+        app.new_instance().await,
+        app.new_instance().await,
+    ];
+    // Devices Apple never accepted anything for, from every instance.
+    let junk = devices(&app, 20, false, &creds).await;
+    rounds(&app, &junk, &creds).await;
+    assert!(!app.state.guard.is_tripped());
+    assert_ne!(app.get("/v1/status").await.json["apns"], "degraded");
+    assert!(
+        app.state.guard.ratios().is_empty(),
+        "junk is not even counted"
+    );
+    // The breaker never protects them: every one was struck out and deleted.
+    for (dev, _) in &junk {
+        assert!(!app.device_exists(&dev.id).await);
+    }
 }
 
 #[tokio::test]
@@ -387,7 +463,6 @@ async fn a_rejected_topic_is_a_configuration_error_not_the_devices_fault() {
     assert_eq!(strikes, 0);
     assert!(w.app.device_exists(&w.dev.id).await);
     assert_eq!(w.app.get("/v1/status").await.json["apns"], "degraded");
-    assert_eq!(w.app.state.guard.ratios()[0].bad, 2, "it feeds the breaker");
 }
 
 #[tokio::test]
@@ -676,4 +751,28 @@ async fn a_full_event_set_forgets_the_oldest_instead_of_giving_up() {
         )
         .await;
     assert_eq!(TestApp::status_of(&r, 0), "accepted");
+}
+
+// ---- cancelled requests ------------------------------------------------------
+
+#[tokio::test]
+async fn a_cancelled_request_does_not_leave_its_event_claimed() {
+    let w = world().await;
+    // Apple takes its time; the caller gives up (the handler future is dropped
+    // in the middle of the send).
+    w.app.mock.script(&w.token, vec![Reply::slow(800)]);
+    let body = json!({ "event_id": uuid_v4(), "handles": [w.handle.secret], "kind": "sync" });
+    let cancelled = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        w.app.push_body(&w.cred, body.clone()),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the request was still running");
+    assert!(w.app.mock.count() >= 1, "it did reach the send");
+    // The retry is sent, not answered `duplicate` for the next 15 minutes.
+    let r = w.app.push_body(&w.cred, body.clone()).await;
+    assert_eq!(TestApp::status_of(&r, 0), "accepted");
+    // And a completed push still keeps its claim.
+    let r = w.app.push_body(&w.cred, body).await;
+    assert_eq!(TestApp::status_of(&r, 0), "duplicate");
 }

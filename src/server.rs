@@ -94,6 +94,12 @@ pub async fn run(settings: Settings) -> Result<(), Box<dyn Error>> {
     let state = build_state(settings)?;
 
     // Housekeeping once now (it also re-seals after a key change), then hourly.
+    let today = state.clock.today();
+    let registered = state
+        .db
+        .call(move |c| crate::db::count_instances_created_on(c, today))
+        .await?;
+    state.set_registrations_today(registered as u32);
     let first = state.clone();
     tokio::task::spawn_blocking(move || maintenance::run_once(&first)).await??;
     tokio::spawn(maintenance::run_forever(state.clone()));

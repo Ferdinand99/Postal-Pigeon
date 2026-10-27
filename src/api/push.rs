@@ -21,6 +21,7 @@ use crate::apns::{Outcome, PushRequest, default_ttl_secs};
 use crate::config::{Env, Kind};
 use crate::crypto::{PREFIX_HANDLE, ct_eq, parse_id_secret, sha256};
 use crate::db::{self, DeviceRow, HandleRow, InstanceRow, Usage};
+use crate::limits::TimedSet;
 use crate::state::AppState;
 use crate::util::is_uuid;
 
@@ -81,6 +82,8 @@ pub struct Message<'a> {
     /// What the collapse id is scoped to (the handle id, or the device id for an
     /// admin test), so one server's `collapse` can't replace another's.
     pub scope: &'a str,
+    /// The instance the push is for (counted by the strike breaker).
+    pub instance: &'a str,
 }
 
 /// Hands one push to Apple for `device` and applies what Apple says to the
@@ -139,11 +142,16 @@ pub async fn deliver(state: &AppState, device: &DeviceRow, tag: &str, msg: &Mess
             Status::Gone
         }
         Outcome::BadToken => {
-            // Feed the breaker first: if many devices answer like this at once
-            // the fault is ours, and nobody is struck or deleted.
-            state.guard.record_bad(&app.id, &device.id);
-            if state.guard.is_tripped() {
-                return Status::Unavailable(None);
+            // Only answers about devices that have worked before count toward the
+            // breaker: if many of them answer like this at once, from several
+            // instances, the fault is ours and nobody is struck or deleted.
+            // Unverified devices (junk is cheap to register) are never counted
+            // and never protected: they are struck as usual.
+            if device.verified {
+                state.guard.record_bad(&app.id, &device.id, msg.instance);
+                if state.guard.is_tripped() {
+                    return Status::Unavailable(None);
+                }
             }
             let strikes = state
                 .db
@@ -163,9 +171,9 @@ pub async fn deliver(state: &AppState, device: &DeviceRow, tag: &str, msg: &Mess
             }
         }
         Outcome::ConfigError(_) => {
-            // The relay's own bundle id or key: counts toward the breaker, never
-            // against the device.
-            state.guard.record_bad(&app.id, &device.id);
+            // The relay's own bundle id or key: never against the device. (The
+            // relay is marked degraded; this is not a signal an attacker can
+            // make by registering devices, so it is not fed to the breaker.)
             Status::Unavailable(None)
         }
         Outcome::TooManyRequests { retry_after } => {
@@ -345,6 +353,7 @@ pub async fn push(
     }
 
     let mut results: Vec<Option<Status>> = vec![None; resolved.len()];
+    let mut claims = Claims::new(&state.events);
     let mut to_send: Vec<(usize, HandleRow, DeviceRow)> = Vec::new();
     let (handle_limiter, device_limiter) = match kind {
         Kind::Alert => (&state.limiters.alert_handle, &state.limiters.alert_device),
@@ -402,10 +411,11 @@ pub async fn push(
             continue;
         }
         // Claim the event before sending, so a concurrent request with the same
-        // event id sees `duplicate` instead of sending a second push. A claim
-        // that does not end in `accepted` is released below. A full set drops
-        // its oldest entry rather than stop deduplicating.
-        if !state.events.insert_evicting(key) {
+        // event id sees `duplicate` instead of sending a second push. The claim
+        // is released unless the send completes with `accepted`, also when this
+        // request is cancelled in the middle of it. A full set drops its oldest
+        // entry rather than stop deduplicating.
+        if !claims.claim(key) {
             results[i] = Some(Status::Duplicate);
             continue;
         }
@@ -421,6 +431,7 @@ pub async fn push(
             collapse: body.collapse.as_deref(),
             ttl_secs: ttl,
             scope: &handle.id,
+            instance: &inst.id,
         };
         async move {
             tokio::time::timeout(SEND_DEADLINE, deliver(state, device, &handle.tag, &msg))
@@ -435,14 +446,13 @@ pub async fn push(
     for ((i, handle, _), status) in to_send.iter().zip(outcomes) {
         if status == Status::Accepted {
             used.push(handle.id.clone());
-        } else {
-            // Not delivered: the same event may be tried again.
-            state
-                .events
-                .remove(&event_key(&inst.id, &body.event_id, &handle.id));
+            // Delivered: the claim stays for 15 minutes.
+            claims.keep(&event_key(&inst.id, &body.event_id, &handle.id));
         }
         results[*i] = Some(status);
     }
+    // Anything not delivered is released, so the same event may be tried again.
+    drop(claims);
 
     let statuses: Vec<Status> = results
         .into_iter()
@@ -474,4 +484,46 @@ pub async fn push(
     Ok(Json(json!({
         "results": statuses.iter().map(Status::to_json).collect::<Vec<_>>(),
     })))
+}
+
+/// Event claims of one request. A claim is released when the guard is dropped
+/// unless it was kept, and it is only kept once the push is `accepted`: if the
+/// request is cancelled mid-send (the client hung up and the handler future is
+/// dropped), the claim goes with it, and the instance's retry is sent instead of
+/// being answered `duplicate` for 15 minutes.
+struct Claims<'a> {
+    set: &'a TimedSet<[u8; 16]>,
+    pending: Vec<[u8; 16]>,
+}
+
+impl<'a> Claims<'a> {
+    fn new(set: &'a TimedSet<[u8; 16]>) -> Self {
+        Claims {
+            set,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Takes the claim; `false` if somebody else holds it.
+    fn claim(&mut self, key: [u8; 16]) -> bool {
+        if self.set.insert_evicting(key) {
+            self.pending.push(key);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The push was delivered: the claim stays.
+    fn keep(&mut self, key: &[u8; 16]) {
+        self.pending.retain(|k| k != key);
+    }
+}
+
+impl Drop for Claims<'_> {
+    fn drop(&mut self) {
+        for key in &self.pending {
+            self.set.remove(key);
+        }
+    }
 }

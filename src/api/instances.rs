@@ -12,7 +12,7 @@ use crate::crypto::{PREFIX_INSTANCE, ct_eq, new_id_secret, new_secret_for, parse
 use crate::db::{self, InstanceRow};
 use crate::pow::{self, PowError};
 use crate::state::AppState;
-use crate::util::{DAY_SECS, addr_prefix, prefix_key, rfc3339};
+use crate::util::{addr_prefix, prefix_key, rfc3339};
 
 /// The products that may register (informational only; not an identity proof).
 pub const PRODUCTS: [&str; 4] = [
@@ -145,33 +145,21 @@ pub async fn register(
     }
 
     let today = state.clock.today();
-    let per_day = i64::from(limits.instance_reg_per_day);
     let credential = {
         let cred = new_id_secret(PREFIX_INSTANCE);
         let prefix = addr_prefix(addr.0);
         let (c, product, version) = (cred.clone(), body.product, body.version);
-        let created = state
+        state
             .db
             .call(move |conn| {
-                if db::count_instances_created_on(conn, today)? >= per_day {
-                    return Ok(false);
-                }
-                db::insert_instance(conn, &c.id, &c.hash, &product, &version, today, &prefix)?;
-                Ok::<_, rusqlite::Error>(true)
+                db::insert_instance(conn, &c.id, &c.hash, &product, &version, today, &prefix)
             })
             .await?;
-        if !created {
-            let until_midnight = (today + 1) * DAY_SECS - state.clock.now_secs();
-            return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "registration_closed",
-                "today's registrations are used up; try again after midnight UTC",
-            )
-            .with_retry_after(until_midnight as u64));
-        }
         cred.full
     };
-    state.registrations.record();
+    // Registration is never closed to everybody. Past the high-water mark the
+    // proof of work just gets harder (see AppState::current_difficulty).
+    state.note_registration();
 
     Ok((
         StatusCode::CREATED,

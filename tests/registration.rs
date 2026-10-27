@@ -150,9 +150,9 @@ async fn product_and_version_are_validated() {
 }
 
 #[tokio::test]
-async fn registration_is_limited_per_address_and_by_a_safety_cap() {
+async fn registration_is_limited_per_address_and_gets_harder_never_closed() {
     let app = TestApp::builder()
-        .limits(|l| l.instance_reg_per_day = 7)
+        .limits(|l| l.instance_reg_high_water_per_day = 7)
         .build()
         .await;
     // A challenge fetched before the budget is used up.
@@ -194,27 +194,14 @@ async fn registration_is_limited_per_address_and_by_a_safety_cap() {
         .await;
     assert_eq!(r.status, 201, "{}", r.json);
 
-    // One more from another address reaches the relay-wide safety cap (7).
+    // One more from another address reaches the day's high-water mark (7)...
+    assert_eq!(app.get("/v1/status").await.json["registration"], "normal");
     app.new_instance().await;
+    assert_eq!(app.get("/v1/status").await.json["registration"], "busy");
+    // ...registration is not closed to anybody. The work just gets harder.
     let ip = app.next_ip();
     let (c, d) = app.challenge_from(&ip).await;
-    let r = app
-        .call_from(
-            &ip,
-            "POST",
-            "/v1/instances",
-            None,
-            Some(app.registration(&c, d)),
-            None,
-        )
-        .await;
-    assert_eq!((r.status.as_u16(), r.error()), (503, "registration_closed"));
-    let wait = r.retry_after().unwrap();
-    assert!(wait > 0 && wait <= DAY_SECS as u64);
-
-    // Tomorrow it opens again.
-    app.clock.advance_secs(DAY_SECS);
-    let (c, d) = app.challenge_from(&ip).await;
+    assert_eq!(d, 4 + 4, "base plus the high-water bits");
     let r = app
         .call_from(
             &ip,
@@ -226,6 +213,18 @@ async fn registration_is_limited_per_address_and_by_a_safety_cap() {
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.json);
+    // A challenge issued at the lower difficulty before is still honoured; one
+    // asked for now is not satisfied by less work than it says.
+    let ip2 = app.next_ip();
+    let (c2, d2) = app.challenge_from(&ip2).await;
+    assert_eq!(d2, 8);
+
+    // Tomorrow it is back to normal.
+    app.clock.advance_secs(DAY_SECS);
+    assert_eq!(app.get("/v1/status").await.json["registration"], "normal");
+    let (_, d) = app.challenge_from(&ip2).await;
+    assert_eq!(d, 4);
+    let _ = c2;
 }
 
 #[tokio::test]

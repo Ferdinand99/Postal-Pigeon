@@ -101,6 +101,11 @@ pub async fn run_forever(state: AppState) {
             ),
             _ => tracing::error!("maintenance_failed"),
         }
+        if state.registration_busy() {
+            tracing::warn!(
+                "registration_busy: above today's high-water mark, the proof of work is raised"
+            );
+        }
         for r in state.guard.ratios() {
             tracing::info!(
                 app = %r.app,

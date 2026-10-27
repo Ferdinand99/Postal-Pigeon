@@ -83,6 +83,15 @@ impl Reply {
         }
     }
 
+    /// A 200 that Apple takes its time over.
+    pub fn slow(ms: u64) -> Reply {
+        Reply {
+            status: 200,
+            body: None,
+            headers: vec![("x-mock-delay-ms", ms.to_string())],
+        }
+    }
+
     pub fn unregistered(timestamp_ms: i64) -> Reply {
         Reply {
             status: 410,
@@ -148,11 +157,18 @@ async fn mock_handler(State(mock): State<Mock>, req: Request) -> Response {
         .get_mut(&token)
         .and_then(VecDeque::pop_front)
         .unwrap_or_else(|| Reply::status(200));
+    if let Some((_, ms)) = reply.headers.iter().find(|(k, _)| *k == "x-mock-delay-ms") {
+        tokio::time::sleep(std::time::Duration::from_millis(ms.parse().unwrap())).await;
+    }
     let mut resp = match reply.body {
         Some(b) => (StatusCode::from_u16(reply.status).unwrap(), axum::Json(b)).into_response(),
         None => StatusCode::from_u16(reply.status).unwrap().into_response(),
     };
-    for (k, v) in reply.headers {
+    for (k, v) in reply
+        .headers
+        .into_iter()
+        .filter(|(k, _)| *k != "x-mock-delay-ms")
+    {
         resp.headers_mut()
             .insert(k, HeaderValue::from_str(&v).unwrap());
     }

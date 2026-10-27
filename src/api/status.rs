@@ -22,6 +22,7 @@ pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "api": [1],
         "apns": state.apns_status(),
+        "registration": if state.registration_busy() { "busy" } else { "normal" },
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }

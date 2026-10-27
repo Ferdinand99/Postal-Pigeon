@@ -5,7 +5,7 @@
 //! per handle, per device, per address) and never per pair, so the relay has no
 //! table that connects an instance to a device.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Mutex;
 
@@ -24,8 +24,12 @@ pub struct Limits {
     pub challenge_ttl_secs: i64,
     /// Instance registrations per address per day.
     pub instance_reg_per_addr_day: u32,
-    /// Instance registrations per day in total; above it `503` until tomorrow.
-    pub instance_reg_per_day: u32,
+    /// High-water mark of registrations per day, relay-wide. Registration is never
+    /// closed: above this the proof of work gets `pow_high_water_extra_bits`
+    /// harder, the log says so every hour and `/v1/status` notes it.
+    pub instance_reg_high_water_per_day: u32,
+    /// Extra proof-of-work bits above the high-water mark, on top of the adaptive ones.
+    pub pow_high_water_extra_bits: u32,
     /// Instance registrations per day from one network (the IPv4 /24 or IPv6 /48).
     pub instance_reg_per_prefix_day: u32,
     /// Registrations in the last hour above which the proof of work gets harder,
@@ -82,6 +86,9 @@ pub struct Limits {
     /// Distinct devices answering `BadDeviceToken` (or another strike-worthy
     /// answer) within the window that stop all striking and deleting.
     pub strike_trip_devices: u32,
+    /// Distinct instances those answers must come from. Only answers about
+    /// devices that have had a push accepted count at all.
+    pub strike_trip_instances: u32,
     /// And the share of an app's answers in the window that they must be, in percent.
     pub strike_trip_percent: u32,
     /// Length of that window in seconds.
@@ -96,9 +103,10 @@ impl Default for Limits {
             pow_difficulty: 20,
             challenge_ttl_secs: 300,
             instance_reg_per_addr_day: 5,
-            // A safety cap only; the per-address and per-network limits and
+            // A high-water mark, not a cap; the per-address and per-network limits and
             // the adaptive proof of work do the real work.
-            instance_reg_per_day: 5000,
+            instance_reg_high_water_per_day: 5000,
+            pow_high_water_extra_bits: 4,
             instance_reg_per_prefix_day: 25,
             pow_adaptive_threshold_per_hour: 30,
             pow_adaptive_max_extra_bits: 8,
@@ -131,6 +139,7 @@ impl Default for Limits {
             header_read_timeout_secs: 10,
             unverified_device_per_hour: 3,
             strike_trip_devices: 10,
+            strike_trip_instances: 3,
             strike_trip_percent: 50,
             strike_window_secs: 600,
             strike_trip_secs: 3600,
@@ -150,9 +159,12 @@ impl Limits {
         if self.challenge_ttl_secs < 10 {
             return Err("challenge_ttl_secs must be at least 10".into());
         }
-        if self.pow_difficulty + self.pow_adaptive_max_extra_bits > 40 {
+        if self.pow_difficulty + self.pow_adaptive_max_extra_bits + self.pow_high_water_extra_bits
+            > 40
+        {
             return Err(
-                "pow_difficulty plus pow_adaptive_max_extra_bits above 40 is not solvable".into(),
+                "the proof-of-work bits (base, adaptive and high-water) above 40 are not solvable"
+                    .into(),
             );
         }
         if self.strike_trip_percent > 100 || self.strike_trip_devices == 0 {
@@ -313,102 +325,133 @@ impl Limiter {
 
 /// A bounded set of keys that expire, such as used challenges and handled
 /// events.
+///
+/// Every key lives for the same time, so the order of insertion is also the
+/// order of expiry: a queue next to the map gives the oldest entry (to drop
+/// when full, or when it has expired) in constant time, and nothing ever scans
+/// the whole set while holding the lock.
 pub struct TimedSet<K> {
     clock: Clock,
     ttl_ms: i64,
     max: usize,
-    map: Mutex<HashMap<K, i64>>,
+    inner: Mutex<TimedInner<K>>,
+}
+
+struct TimedInner<K> {
+    map: HashMap<K, i64>,
+    /// `(expires_at_ms, key)` in insertion order. An entry whose key was
+    /// removed, or inserted again later, is stale and skipped when it reaches
+    /// the front.
+    order: VecDeque<(i64, K)>,
+}
+
+impl<K: Hash + Eq + Clone> TimedInner<K> {
+    /// Pops the front entry of the queue, and returns the key if it was the
+    /// live one (and so removes it from the map).
+    fn pop_oldest(&mut self) -> Option<K> {
+        let (exp, key) = self.order.pop_front()?;
+        if self.map.get(&key) == Some(&exp) {
+            self.map.remove(&key);
+        }
+        Some(key)
+    }
+
+    /// Forgets everything that has expired.
+    fn expire(&mut self, now: i64) {
+        while self.order.front().is_some_and(|(exp, _)| *exp <= now) {
+            self.pop_oldest();
+        }
+    }
+
+    fn push(&mut self, key: K, expires: i64) {
+        self.map.insert(key.clone(), expires);
+        self.order.push_back((expires, key));
+        // Stale queue entries (from removals) must not pile up: when the queue
+        // is much longer than the map, drop the ones that no longer count.
+        if self.order.len() > 2 * self.map.len() + 64 {
+            let map = &self.map;
+            self.order.retain(|(exp, k)| map.get(k) == Some(exp));
+        }
+    }
 }
 
 /// The set is full of live entries.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Full;
 
-impl<K: Hash + Eq> TimedSet<K> {
+impl<K: Hash + Eq + Clone> TimedSet<K> {
     pub fn new(clock: &Clock, ttl_secs: i64, max: usize) -> Self {
         TimedSet {
             clock: clock.clone(),
             ttl_ms: ttl_secs * 1000,
             max,
-            map: Mutex::new(HashMap::new()),
+            inner: Mutex::new(TimedInner {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+            }),
         }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, TimedInner<K>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn contains(&self, key: &K) -> bool {
         let now = self.clock.now_ms();
-        let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        map.get(key).is_some_and(|exp| *exp > now)
+        self.lock().map.get(key).is_some_and(|exp| *exp > now)
     }
 
     /// Adds `key`: `Ok(true)` if it is new, `Ok(false)` if it was there.
     pub fn insert(&self, key: K) -> Result<bool, Full> {
         let now = self.clock.now_ms();
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(exp) = map.get(&key)
-            && *exp > now
-        {
+        let mut inner = self.lock();
+        inner.expire(now);
+        if inner.map.contains_key(&key) {
             return Ok(false);
         }
-        if map.len() >= self.max {
-            map.retain(|_, exp| *exp > now);
-            if map.len() >= self.max {
-                return Err(Full);
-            }
+        if inner.map.len() >= self.max {
+            return Err(Full);
         }
-        map.insert(key, now + self.ttl_ms);
+        inner.push(key, now + self.ttl_ms);
         Ok(true)
     }
 
-    /// Forgets `key`.
-    pub fn remove(&self, key: &K) {
-        self.map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(key);
-    }
-
-    /// Drops expired entries.
-    pub fn prune(&self) {
-        let now = self.clock.now_ms();
-        self.map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, exp| *exp > now);
-    }
-
-    pub fn len(&self) -> usize {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-impl<K: Hash + Eq + Clone> TimedSet<K> {
     /// Adds `key` like [`TimedSet::insert`] and returns whether it is new, but
     /// when the set is full of live entries it forgets the oldest one instead
     /// of refusing, so the set never silently stops working.
     pub fn insert_evicting(&self, key: K) -> bool {
         let now = self.clock.now_ms();
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        if map.get(&key).is_some_and(|exp| *exp > now) {
+        let mut inner = self.lock();
+        inner.expire(now);
+        if inner.map.contains_key(&key) {
             return false;
         }
-        if map.len() >= self.max {
-            map.retain(|_, exp| *exp > now);
-            if map.len() >= self.max {
-                let oldest = map
-                    .iter()
-                    .min_by_key(|(_, exp)| **exp)
-                    .map(|(k, _)| k.clone());
-                if let Some(oldest) = oldest {
-                    map.remove(&oldest);
-                }
+        while inner.map.len() >= self.max {
+            if inner.pop_oldest().is_none() {
+                break;
             }
         }
-        map.insert(key, now + self.ttl_ms);
+        inner.push(key, now + self.ttl_ms);
         true
+    }
+
+    /// Forgets `key`.
+    pub fn remove(&self, key: &K) {
+        self.lock().map.remove(key);
+    }
+
+    /// Drops expired entries.
+    pub fn prune(&self) {
+        let now = self.clock.now_ms();
+        self.lock().expire(now);
+    }
+
+    pub fn len(&self) -> usize {
+        self.lock().map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -526,6 +569,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn eviction_skips_stale_queue_entries() {
+        let clock = Clock::new();
+        let s: TimedSet<u32> = TimedSet::new(&clock, 100, 3);
+        for i in 0..3 {
+            assert!(s.insert_evicting(i));
+            clock.advance_secs(1);
+        }
+        // Removing and re-adding leaves a stale entry at the front of the queue.
+        s.remove(&0);
+        assert!(s.insert_evicting(0));
+        clock.advance_secs(1);
+        // Full again: the oldest live entry is 1, not the stale 0.
+        assert!(s.insert_evicting(10));
+        assert!(!s.contains(&1));
+        assert!(s.contains(&0) && s.contains(&2) && s.contains(&10));
+        assert_eq!(s.len(), 3);
+        // Expired entries leave on their own.
+        clock.advance_secs(101);
+        s.prune();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn eviction_does_not_scan_the_whole_set() {
+        let clock = Clock::new();
+        let max = 100_000;
+        let s: TimedSet<u64> = TimedSet::new(&clock, 3600, max);
+        for i in 0..max as u64 {
+            assert!(s.insert_evicting(i));
+        }
+        // Another 100,000 inserts into a full set. A scan of the set for the
+        // oldest entry on each one would be ten billion steps.
+        let started = std::time::Instant::now();
+        for i in 0..max as u64 {
+            assert!(s.insert_evicting(max as u64 + i));
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(s.len(), max);
+        assert!(!s.contains(&0) && s.contains(&(2 * max as u64 - 1)));
+    }
     #[test]
     fn evicting_set_never_stops_working() {
         let clock = Clock::new();
