@@ -1,4 +1,4 @@
-// Wise Wren landing page — progressive enhancement only. Everything on the
+// Postal Pigeon landing page — progressive enhancement only. Everything on the
 // page works without this file: the nav wraps and all content is visible.
 // It makes no network requests and stores nothing.
 (function () {
