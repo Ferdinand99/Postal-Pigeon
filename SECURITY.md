@@ -10,7 +10,7 @@ code to attack yet. The apps do not depend on it.
 **Do not open a public issue for security problems.**
 
 Once it is enabled, report it privately through GitHub's
-[private vulnerability reporting](https://github.com/Ferdinand99/Hedgerow-Relay/security/advisories/new): go to
+[private vulnerability reporting](https://github.com/Ferdinand99/Postal-Pigeon/security/advisories/new): go to
 the repository's **Security** tab and click **Report a vulnerability**. Only you and the maintainer can see the
 report. Until it is enabled, contact the maintainer through their
 [GitHub profile](https://github.com/Ferdinand99) and ask for a private channel before sharing details.

@@ -1,7 +1,6 @@
 # Postal Pigeon: design
 
-Postal Pigeon ("Pigeon") is the Hedgerow push relay. In this document, "the relay" means Postal Pigeon. The repository is
-called Hedgerow-Relay for now.
+Postal Pigeon ("Pigeon") is the Hedgerow push relay. In this document, "the relay" means Postal Pigeon.
 
 Status: design phase. This document describes what will be built. Nothing here is implemented, and details may
 still change before the first release.

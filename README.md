@@ -17,7 +17,7 @@
 > the threat model and the security policy. There is no code to install or run.
 
 Postal Pigeon ("Pigeon") is the push-notification relay for [Hedgerow](https://hedgerow.tools/), a family of small
-self-hosted apps. The repository is called Hedgerow-Relay for now.
+self-hosted apps.
 
 ## Why it exists
 
@@ -50,6 +50,8 @@ Pigeon with their own Apple developer account. The code is open for exactly that
 - Apple sees the token, the time and the tiny content-free message, as it does for every iOS push.
 - You can turn push off, revoke a single server from the app, or delete your device at any time.
 
+The overview will also be on the [website](https://hedgerow.tools/Postal-Pigeon/) once it is up.
+
 ## Design
 
 The full design is in [`docs/design.md`](docs/design.md): the API, how servers and phones register, what is stored and
@@ -62,7 +64,7 @@ proxy, with a health endpoint.
 ## Contributing
 
 Pigeon is not open for contributions yet. When it is, a contributor licence agreement will be required for code
-contributions. Until then, issues and ideas are welcome on the [issue tracker](https://github.com/Ferdinand99/Hedgerow-Relay/issues).
+contributions. Until then, issues and ideas are welcome on the [issue tracker](https://github.com/Ferdinand99/Postal-Pigeon/issues).
 Please report security problems privately, as described in [`SECURITY.md`](SECURITY.md).
 
 Postal Pigeon is part of [Hedgerow](https://hedgerow.tools/), with [Vigilant Vole](https://hedgerow.tools/Vigilant-Vole/),
