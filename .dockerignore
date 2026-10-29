@@ -6,7 +6,6 @@ secrets/
 *.p8
 .git
 .github
-.claude
 .vscode
 .idea
 .env
