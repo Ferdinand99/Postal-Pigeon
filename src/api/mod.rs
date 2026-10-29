@@ -12,9 +12,11 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, X_CONTENT_TYPE_OPTIONS};
+use axum::http::header::{
+    ALLOW, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{Extensions, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -66,11 +68,13 @@ async fn not_found() -> ApiError {
     ApiError::not_found()
 }
 
-/// Sheds load beyond the in-flight limit and sets headers on every answer.
+/// Sheds load beyond the in-flight limits, answers framework errors in the
+/// API's own format, and sets headers on every answer.
 async fn guard(State(state): State<AppState>, req: Request, next: Next) -> Response {
     // The health check has a small pool of its own, so it keeps answering
     // while the rest is being shed.
-    let pool = if matches!(req.uri().path(), "/" | "/healthz") {
+    let health = matches!(req.uri().path(), "/" | "/healthz");
+    let pool = if health {
         &state.health_inflight
     } else {
         &state.inflight
@@ -78,15 +82,77 @@ async fn guard(State(state): State<AppState>, req: Request, next: Next) -> Respo
     let Ok(_permit) = pool.clone().try_acquire_owned() else {
         return ApiError::overloaded(1).into_response();
     };
+    // One address (behind the proxy, the real client) may only have so many
+    // requests running, so a few clients that hold requests open (a body sent
+    // one byte at a time) cannot take every permit and shut the others out.
+    let _addr_permit = if health {
+        None
+    } else {
+        let ip = client_ip_of(&state, req.extensions(), req.headers());
+        match state.addr_inflight.acquire(&addr_key(ip)) {
+            Some(p) => Some(p),
+            None => return ApiError::too_many_at_once().into_response(),
+        }
+    };
     let mut resp = next.run(req).await;
+    if !health {
+        resp = in_api_format(resp);
+    }
     let h = resp.headers_mut();
     h.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     h.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     resp
 }
 
+/// Errors the router and the extractors make on their own (`405` without a
+/// body, a plain-text `400` for a bad path) become the API's JSON error.
+fn in_api_format(resp: Response) -> Response {
+    let status = resp.status();
+    let plain = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/plain"));
+    let err = match status {
+        StatusCode::METHOD_NOT_ALLOWED if !resp.headers().contains_key(CONTENT_TYPE) => {
+            ApiError::method_not_allowed()
+        }
+        StatusCode::BAD_REQUEST if plain => {
+            ApiError::invalid("the request could not be understood")
+        }
+        _ => return resp,
+    };
+    let allow = resp.headers().get(ALLOW).cloned();
+    let mut out = err.into_response();
+    if let Some(a) = allow {
+        out.headers_mut().insert(ALLOW, a);
+    }
+    out
+}
+
 /// The client's address, behind the configured proxies.
 pub struct ClientAddr(pub IpAddr);
+
+/// The address of the client that made a request: the peer, or what the
+/// trusted proxies say about it in `X-Forwarded-For`.
+fn client_ip_of(state: &AppState, extensions: &Extensions, headers: &HeaderMap) -> IpAddr {
+    let peer = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    // Every X-Forwarded-For line counts (a request may carry several), read
+    // from the right.
+    let forwarded: Vec<&str> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    let trusted = &state.settings.trusted_proxies;
+    if !forwarded.is_empty() && !trusted.iter().any(|n| n.contains(peer)) {
+        state.note_untrusted_forwarded_for();
+    }
+    client_ip(peer, &forwarded, trusted)
+}
 
 impl ClientAddr {
     /// The key rate limits use for this address.
@@ -102,24 +168,11 @@ impl FromRequestParts<AppState> for ClientAddr {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let peer = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| c.0.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        // Every X-Forwarded-For line counts (a request may carry several), read
-        // from the right.
-        let forwarded: Vec<&str> = parts
-            .headers
-            .get_all("x-forwarded-for")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect();
-        let trusted = &state.settings.trusted_proxies;
-        if !forwarded.is_empty() && !trusted.iter().any(|n| n.contains(peer)) {
-            state.note_untrusted_forwarded_for();
-        }
-        Ok(ClientAddr(client_ip(peer, &forwarded, trusted)))
+        Ok(ClientAddr(client_ip_of(
+            state,
+            &parts.extensions,
+            &parts.headers,
+        )))
     }
 }
 
@@ -131,6 +184,13 @@ impl<T: DeserializeOwned> FromRequest<AppState> for ApiJson<T> {
     type Rejection = ApiError;
 
     async fn from_request(req: Request, state: &AppState) -> Result<Self, Self::Rejection> {
+        // Only a body that says it is JSON. A browser may send a cross-site
+        // POST of any other type without asking first (no CORS preflight), and
+        // so spend the visitor's address budget or fill the tables for whoever
+        // runs the page; `application/json` forces the preflight, which fails.
+        if !is_json(req.headers()) {
+            return Err(ApiError::unsupported_media_type());
+        }
         let read = tokio::time::timeout(BODY_TIMEOUT, Bytes::from_request(req, state)).await;
         let bytes = match read {
             Err(_) => {
@@ -150,6 +210,16 @@ impl<T: DeserializeOwned> FromRequest<AppState> for ApiJson<T> {
             .map(ApiJson)
             .map_err(|_| ApiError::invalid("the body is not the JSON this call expects"))
     }
+}
+
+/// Whether the request's `Content-Type` is `application/json` (parameters such
+/// as a charset are fine).
+fn is_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"))
 }
 
 /// The secret in `Authorization: Bearer <secret>`, if there is one.

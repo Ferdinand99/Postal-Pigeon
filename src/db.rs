@@ -353,6 +353,28 @@ pub fn insert_device(c: &mut Connection, d: &NewDevice<'_>) -> DbResult<()> {
     tx.commit()
 }
 
+/// Deletes up to `limit` devices that nobody has given to a server and that
+/// Apple never accepted a push for, oldest first, and only those registered
+/// before `registered_before_ms`. Returns how many it deleted.
+///
+/// Such a record can receive nothing, and its app finds it gone with `404` on
+/// its next keep-alive and registers again (docs/api.md). This is what frees
+/// room in a table that unauthenticated registrations have filled.
+pub fn evict_idle_devices(
+    c: &Connection,
+    registered_before_ms: i64,
+    limit: i64,
+) -> DbResult<usize> {
+    c.execute(
+        "DELETE FROM devices WHERE id IN (
+             SELECT d.id FROM devices d
+             WHERE d.verified = 0 AND d.token_set_ms < ?1
+               AND NOT EXISTS (SELECT 1 FROM handles h WHERE h.device_id = d.id)
+             ORDER BY d.token_set_ms LIMIT ?2)",
+        params![registered_before_ms, limit],
+    )
+}
+
 pub fn count_devices(c: &Connection) -> DbResult<i64> {
     c.query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0))
 }

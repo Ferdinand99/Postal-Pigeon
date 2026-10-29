@@ -251,16 +251,15 @@ impl Apns {
     /// Shares the provider token through files in `dir` (mode 0600, ideally a
     /// tmpfs): the relay and the admin commands then use one token instead of
     /// each minting its own, which Apple limits to one per 20 minutes.
+    ///
+    /// The folder must be a real directory (not a link) that only this user can
+    /// enter, else it is not used and every process makes its own token: a
+    /// predictable folder in a shared temp directory could otherwise be made by
+    /// someone else first, to read the token or to plant one.
     pub fn with_token_dir(mut self, dir: PathBuf) -> Self {
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::warn!(error = %e, "apns_token_dir_unusable");
-        } else {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-            }
-            self.token_dir = Some(dir);
+        match std::fs::create_dir_all(&dir).and_then(|()| private_dir(&dir)) {
+            Ok(()) => self.token_dir = Some(dir),
+            Err(e) => tracing::warn!(error = %e, "apns_token_dir_unusable"),
         }
         self
     }
@@ -655,6 +654,25 @@ fn safe_reason(reason: &str) -> String {
         .collect()
 }
 
+/// Makes sure `dir` is a directory this user owns and nobody else can enter:
+/// not a symbolic link, and (on Unix) mode 0700 after we set it, which fails
+/// for a directory somebody else owns.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() {
+        return Err(std::io::Error::other("not a plain directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        if std::fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::other("others can enter the directory"));
+        }
+    }
+    Ok(())
+}
+
 /// Writes a file only the owner can read.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
@@ -734,6 +752,32 @@ mod tests {
         );
         let long = "c".repeat(100);
         assert!(collapse_id(Kind::Alert, "T", Some(&long)).unwrap().len() <= 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_token_dir_must_be_a_real_private_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = std::env::temp_dir().join(format!("pp-dir-{}", uuid_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // A directory that is ours is closed to others.
+        let real = base.join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(private_dir(&real).is_ok());
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+
+        // A link, even to a good directory, is not followed, and neither is a file.
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(private_dir(&link).is_err());
+        let file = base.join("file");
+        std::fs::write(&file, "x").unwrap();
+        assert!(private_dir(&file).is_err());
+        assert!(private_dir(&base.join("missing")).is_err());
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

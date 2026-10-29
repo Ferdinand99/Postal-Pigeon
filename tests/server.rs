@@ -133,3 +133,31 @@ async fn it_stops_when_told_to() {
         .expect("serve returns after shutdown")
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_request_head_over_16_kib_is_refused() {
+    let r = start(5).await;
+    // A head of ordinary size is served.
+    let mut s = TcpStream::connect(r.addr).await.unwrap();
+    let ok = format!(
+        "GET /healthz HTTP/1.1\r\nhost: x\r\nconnection: close\r\nx-pad: {}\r\n\r\n",
+        "a".repeat(4 * 1024)
+    );
+    s.write_all(ok.as_bytes()).await.unwrap();
+    let (text, _) = read_until_closed(&mut s, Duration::from_secs(5)).await;
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+
+    // A far larger one is not buffered: hyper's default would take about 400 KiB
+    // per connection.
+    let mut s = TcpStream::connect(r.addr).await.unwrap();
+    let big = format!(
+        "GET /healthz HTTP/1.1\r\nhost: x\r\nconnection: close\r\nx-pad: {}\r\n\r\n",
+        "a".repeat(64 * 1024)
+    );
+    let _ = s.write_all(big.as_bytes()).await;
+    let (text, closed) = read_until_closed(&mut s, Duration::from_secs(5)).await;
+    assert!(closed);
+    assert!(text.starts_with("HTTP/1.1 431"), "{text}");
+    let _ = r.stop.send(());
+    r.task.await.unwrap();
+}

@@ -76,6 +76,10 @@ pub struct Limits {
     pub max_inflight_requests: usize,
     /// Extra permits only /healthz uses, so it answers while the rest is shed.
     pub health_inflight_requests: usize,
+    /// Requests one client address (an IPv6 /64) may have in progress at once;
+    /// more get `429`. Keeps a few slow clients from using up every
+    /// `max_inflight_requests` permit.
+    pub max_inflight_per_addr: usize,
     /// Connections open at once; more wait in the kernel backlog.
     pub max_connections: usize,
     /// Seconds a client has to send its request headers, also the idle time of
@@ -135,6 +139,7 @@ impl Default for Limits {
             max_tracked_keys: 100_000,
             max_inflight_requests: 2048,
             health_inflight_requests: 16,
+            max_inflight_per_addr: 64,
             max_connections: 4096,
             header_read_timeout_secs: 10,
             unverified_device_per_hour: 3,
@@ -320,6 +325,66 @@ impl Limiter {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// Requests in progress per client address. An address that already has `max`
+/// requests running is refused a further one until one of them finishes, so a
+/// client that holds requests open (a slow body, say) can use up only its own
+/// share of the relay's request permits. The map holds only addresses with a
+/// request running, so it never outgrows the number of permits.
+pub struct AddrInflight {
+    max: usize,
+    counts: std::sync::Arc<Mutex<HashMap<String, usize>>>,
+}
+
+/// Held while a request runs; frees the address's slot when dropped.
+pub struct AddrPermit {
+    key: String,
+    counts: std::sync::Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl AddrInflight {
+    pub fn new(max: usize) -> Self {
+        AddrInflight {
+            max: max.max(1),
+            counts: std::sync::Arc::default(),
+        }
+    }
+
+    /// A slot for `key`, or `None` if it already has the most it may have.
+    pub fn acquire(&self, key: &str) -> Option<AddrPermit> {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let n = counts.entry(key.to_string()).or_insert(0);
+        if *n >= self.max {
+            return None;
+        }
+        *n += 1;
+        Some(AddrPermit {
+            key: key.to_string(),
+            counts: self.counts.clone(),
+        })
+    }
+
+    /// Addresses with a request running.
+    pub fn len(&self) -> usize {
+        self.counts.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Drop for AddrPermit {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = counts.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                counts.remove(&self.key);
+            }
+        }
     }
 }
 
@@ -662,6 +727,25 @@ mod tests {
         assert_eq!(l.difficulty_for(120), 23);
         assert_eq!(l.difficulty_for(1_000_000), 23, "capped");
     }
+    #[test]
+    fn an_address_has_a_limit_on_requests_at_once() {
+        let a = AddrInflight::new(2);
+        let one = a.acquire("x").unwrap();
+        let _two = a.acquire("x").unwrap();
+        assert!(a.acquire("x").is_none());
+        assert!(a.acquire("y").is_some(), "other addresses are not affected");
+        drop(one);
+        assert!(
+            a.acquire("x").is_some(),
+            "a finished request frees its slot"
+        );
+        drop(_two);
+        // Addresses with nothing running are forgotten.
+        assert!(a.is_empty());
+        // A zero limit is read as one, not as "nobody".
+        assert!(AddrInflight::new(0).acquire("x").is_some());
+    }
+
     #[test]
     fn default_limits_are_valid() {
         assert!(Limits::default().validate().is_ok());
