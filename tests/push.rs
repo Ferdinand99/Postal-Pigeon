@@ -96,6 +96,7 @@ async fn bodies_over_2_kib_and_bad_json_are_refused() {
         .method("POST")
         .uri("/v1/push")
         .header("authorization", format!("Bearer {}", w.cred))
+        .header("content-type", "application/json")
         .body(Body::from("{not json"))
         .unwrap();
     let r = w.app.raw(req).await;

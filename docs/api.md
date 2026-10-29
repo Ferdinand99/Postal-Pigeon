@@ -5,7 +5,9 @@ This is the reference for people who write an app or a server that uses the rela
 
 ## Conventions
 
-- JSON over HTTPS. Every path starts with `/v1`. Send `Content-Type: application/json`.
+- JSON over HTTPS. Every path starts with `/v1`. A request with a body must say `Content-Type: application/json`
+  (a charset is fine); any other type, or none, is refused with `415 unsupported_media_type`, so that a web page cannot
+  post to the relay on a visitor's behalf. The relay sends no CORS headers.
 - Request bodies are at most **2 KiB** (`413 too_large` above that). Unknown fields are ignored.
 - Authentication is `Authorization: Bearer <secret>`.
 - Errors look like `{"error": "<code>", "message": "<text>"}`. The code is stable; the text is for people. A `429` or
@@ -25,9 +27,11 @@ This is the reference for people who write an app or a server that uses the rela
 | `unknown_instance` | 401 | The instance credential is well formed but the relay does not know it (for example after a database loss). Register again. |
 | `suspended` | 403 | The instance is suspended. Do **not** register again; tell the administrator. |
 | `not_found` | 404 | No such device or handle. |
+| `method_not_allowed` | 405 | The path does not take that method. |
 | `limit_reached` | 409 | A device already has the most handles it may have (32). |
 | `too_large` | 413 | The body is over 2 KiB. |
-| `rate_limited` | 429 | A limit applies. Wait `Retry-After` seconds. |
+| `unsupported_media_type` | 415 | The body is not sent as `application/json`. |
+| `rate_limited` | 429 | A limit applies, or the address has too many requests running at once. Wait `Retry-After` seconds. |
 | `overloaded` | 503 | The relay is busy or full; retry later. |
 
 ## Health and status
@@ -210,7 +214,7 @@ The numbers below are the defaults (design section 10) and can be changed by the
 | Limit | Default |
 |---|---|
 | Instance registration | proof of work (`pow_difficulty`, 20 bits, plus up to `pow_adaptive_max_extra_bits` = 8 more: one bit for each doubling of the last hour's registrations above `pow_adaptive_threshold_per_hour` = 30); `instance_reg_per_addr_day` 5 per address (IPv6 /64); `instance_reg_per_prefix_day` 25 per network (IPv4 /24, IPv6 /48); `instance_reg_high_water_per_day` 5000 relay-wide: registration is never closed, but above it the work asked for rises by `pow_high_water_extra_bits` = 4 more bits until midnight UTC, `/v1/status` shows `"registration": "busy"` and the log says so |
-| Device registration | `device_reg_per_addr_hour` 20, `device_reg_per_addr_day` 100 per address; `device_reg_per_prefix_hour` 100, `device_reg_per_prefix_day` 500 per network; `max_devices` 1,000,000 rows (registering a known token is always allowed) |
+| Device registration | `device_reg_per_addr_hour` 20, `device_reg_per_addr_day` 100 per address; `device_reg_per_prefix_hour` 100, `device_reg_per_prefix_day` 500 per network; `max_devices` 1,000,000 rows (registering a known token is always allowed; when the table is full, the oldest records that have no handle, never had a push accepted and are more than an hour old are removed to make room, and the registration is refused with `503` only if there are none) |
 | Devices Apple never accepted | `unverified_device_per_hour` 3 sends per hour, until the first push is accepted |
 | Handles | `handle_create_per_device_hour` 10, `max_handles_per_device` 32 |
 | Device updates | `device_update_per_hour` 20 per device |
@@ -222,7 +226,7 @@ The numbers below are the defaults (design section 10) and can be changed by the
 | Wrong credentials per address | `auth_failures_per_addr_hour` 60 |
 | Toward Apple | `app_sends_per_second` 100 per app (burst twice that) |
 | Strike breaker | `strike_trip_devices` 10 devices that have had a push accepted before, on behalf of at least `strike_trip_instances` 3 different instances, answering `BadDeviceToken` and the like within `strike_window_secs` 600, making up `strike_trip_percent` 50 of an app's answers, stop all striking and deleting for `strike_trip_secs` 3600 |
-| Other | `max_handles_per_request` 25, `challenge_ttl_secs` 300, `max_tracked_keys` 100,000 per limiter (the least recently used are dropped when full), `max_inflight_requests` 2048 (plus `health_inflight_requests` 16 for `/` and `/healthz` only), `max_connections` 4096, `header_read_timeout_secs` 10 |
+| Other | `max_handles_per_request` 25, `challenge_ttl_secs` 300, `max_tracked_keys` 100,000 per limiter (the least recently used are dropped when full), `max_inflight_requests` 2048 (plus `health_inflight_requests` 16 for `/` and `/healthz` only), `max_inflight_per_addr` 64 requests running at once per address (an IPv6 /64), `max_connections` 4096, `header_read_timeout_secs` 10; a request line and headers over 16 KiB get `431` |
 
 ## Versioning
 

@@ -724,3 +724,24 @@ change the API's shape.
   HMAC keys must differ, key material is wiped from memory after loading, APNs addresses must be https (a hidden
   test-only flag aside), and `RUST_LOG` only sets the relay's own level: other crates stay at `warn`, the provider token's
   header is marked sensitive, so no log level prints the token or a device token.
+
+### Hardening after the second review (October 2026)
+
+Findings and reasons are in [`security-review-2026-10.md`](security-review-2026-10.md). The API's shape does not change,
+except that a body must now be sent as `application/json`.
+
+- **Only JSON bodies (section 6).** A request with a body that is not `Content-Type: application/json` gets `415`. Web
+  pages can send other types cross-site without the browser asking first, and the relay would have counted the visitor's
+  address, not the page's. With JSON the browser must ask first, and the relay answers no CORS headers.
+- **A full device table makes room (sections 9, 10).** Past `max_devices`, registration removes the oldest records
+  that have no handle, never had a push accepted and are over an hour old, instead of refusing everybody until the
+  junk expires. An app finds its record gone with `404` and registers again, as section 6.3 already says.
+- **Requests in progress per address (section 12).** One address (an IPv6 /64) may have 64 requests running; the next
+  gets `429`. Without it, a few clients holding request bodies open used up the 2048 permits for everyone. The health
+  check is not counted.
+- **Smaller request heads (section 12).** Request line and headers are limited to 16 KiB (`431`), not hyper's default of
+  about 400 KiB, which at 4096 connections is more than the container's memory.
+- **The shared provider-token folder (section 8)** must be a real directory the relay owns and nobody else can enter,
+  else it is not used. This matters for a relay run outside the container, where the folder is in the shared temp
+  directory.
+- **Errors in one format.** `405` and a bad path answer in the API's JSON error format.

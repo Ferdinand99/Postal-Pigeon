@@ -66,6 +66,33 @@ impl ApiError {
         )
     }
 
+    pub fn unsupported_media_type() -> Self {
+        Self::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "send the body as Content-Type: application/json",
+        )
+    }
+
+    pub fn method_not_allowed() -> Self {
+        Self::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "this path does not take that method",
+        )
+    }
+
+    /// Too many requests from one address are being handled at the same time.
+    pub fn too_many_at_once() -> Self {
+        let mut e = Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many requests from this address at once; retry later",
+        );
+        e.retry_after = Some(1);
+        e
+    }
+
     pub fn rate_limited(retry_after: u64) -> Self {
         let mut e = Self::new(
             StatusCode::TOO_MANY_REQUESTS,

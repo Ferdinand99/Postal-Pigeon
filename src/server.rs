@@ -31,6 +31,12 @@ use crate::state::AppState;
 /// The database file inside the data directory.
 pub const DB_FILE: &str = "pigeon.sqlite";
 
+/// Most bytes of request line and headers one connection may buffer. The
+/// default is about 400 KiB, which at the connection limit is more memory than
+/// the container has; the relay's own requests have a few hundred bytes of
+/// headers, and a larger head is refused with `431`.
+pub const MAX_HEAD_BYTES: usize = 16 * 1024;
+
 /// Opens the database, loads the keys and the APNs key.
 pub fn build_state(settings: Settings) -> Result<AppState, Box<dyn Error>> {
     settings.check_apns_urls()?;
@@ -167,6 +173,7 @@ pub async fn serve(
             });
             let conn = hyper::server::conn::http1::Builder::new()
                 .timer(TokioTimer::new())
+                .max_buf_size(MAX_HEAD_BYTES)
                 .header_read_timeout(header_timeout)
                 .keep_alive(true)
                 .serve_connection(TokioIo::new(stream), service);

@@ -47,7 +47,8 @@ services:
     user: "1000:1000"
     read_only: true
     tmpfs:
-      - /tmp
+      # Only the shared APNs provider token lives here: small, and nothing runs from it.
+      - /tmp:size=16m,noexec,nosuid,nodev
     # A runaway relay can not take the host with it.
     mem_limit: 256m
     cpus: 1.0

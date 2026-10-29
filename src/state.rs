@@ -13,7 +13,7 @@ use crate::config::Settings;
 use crate::crypto::Keys;
 use crate::db::Db;
 use crate::guard::StrikeGuard;
-use crate::limits::{Limiter, Limits, RecentCounter, TimedSet};
+use crate::limits::{AddrInflight, Limiter, Limits, RecentCounter, TimedSet};
 
 /// How long a handled `event_id` is remembered (seconds).
 pub const EVENT_TTL_SECS: i64 = 15 * 60;
@@ -176,6 +176,8 @@ pub struct Inner {
     pub inflight: Arc<Semaphore>,
     /// A small separate pool for /healthz, so it answers while the rest is shed.
     pub health_inflight: Arc<Semaphore>,
+    /// Requests in progress per client address.
+    pub addr_inflight: AddrInflight,
     /// Instance registrations in the last hour (drives the adaptive proof of work).
     pub registrations: RecentCounter,
     /// Instances registered today (day, count), for the high-water mark.
@@ -207,6 +209,7 @@ impl AppState {
             backoff: Mutex::new(HashMap::new()),
             inflight: Arc::new(Semaphore::new(limits.max_inflight_requests)),
             health_inflight: Arc::new(Semaphore::new(limits.health_inflight_requests)),
+            addr_inflight: AddrInflight::new(limits.max_inflight_per_addr),
             registrations: RecentCounter::new(&clock),
             registered_today: Mutex::new((i64::MIN, 0)),
             guard: StrikeGuard::new(

@@ -18,6 +18,10 @@ use crate::db::{self, DeviceRow, NewDevice};
 use crate::state::AppState;
 use crate::util::{b64_decode, day_string, prefix_key};
 
+/// A device without a handle that is younger than this is never evicted to make
+/// room for a new registration (milliseconds).
+const IDLE_DEVICE_MS: i64 = 3_600_000;
+
 /// Normalises a device token: hexadecimal, 32 to 200 bytes, lower case.
 fn clean_token(token: &str) -> Option<String> {
     let t = token.trim();
@@ -98,7 +102,17 @@ pub async fn register(
             // A record with the same token is replaced, so it adds no row and
             // is allowed even when the table is full.
             if !db::device_fp_exists(c, &fp)? && db::count_devices(c)? >= max {
-                return Ok(false);
+                // Full. Registering is open to anyone, so junk can fill the
+                // table: make room by dropping the oldest records that have no
+                // handle and never had a push accepted (a real app registers
+                // again when it finds its record gone). Records younger than
+                // an hour are kept, so a device that is about to ask for its
+                // first handle is not the one to go.
+                let idle = now_ms - IDLE_DEVICE_MS;
+                let batch = (max / 100).max(1);
+                if db::evict_idle_devices(c, idle, batch)? == 0 {
+                    return Ok(false);
+                }
             }
             db::insert_device(
                 c,
