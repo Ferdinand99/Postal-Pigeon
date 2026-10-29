@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/Ferdinand99/Postal-Pigeon/compare/v0.1.1...v0.1.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* security review findings ([#12](https://github.com/Ferdinand99/Postal-Pigeon/issues/12)) ([5d2d37b](https://github.com/Ferdinand99/Postal-Pigeon/commit/5d2d37bb8b43ae7f248ab5012d4ac9a6016879cd))
+
 ## [0.1.1](https://github.com/Ferdinand99/Postal-Pigeon/compare/v0.1.0...v0.1.1) (2026-10-27)
 
 
