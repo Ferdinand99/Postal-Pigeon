@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/Ferdinand99/Postal-Pigeon/compare/v0.1.2...v0.2.0) (2026-10-30)
+
+
+### Features
+
+* accept sylo as a product and serve it as an app ([#14](https://github.com/Ferdinand99/Postal-Pigeon/issues/14)) ([7588e0b](https://github.com/Ferdinand99/Postal-Pigeon/commit/7588e0b551515e5bf02c6e409378c5fb4b4faa5b))
+
 ## [0.1.2](https://github.com/Ferdinand99/Postal-Pigeon/compare/v0.1.1...v0.1.2) (2026-10-29)
 
 
