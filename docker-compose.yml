@@ -31,7 +31,7 @@ services:
       - PP_APNS_KEY_ID=XXXXXXXXXX # the key's id, shown by Apple
       - PP_APNS_TEAM_ID=YYYYYYYYYY # your Apple developer team id
       - PP_APNS_ENVIRONMENT=production,sandbox
-      - PP_APPS=hedgerow=com.example.hedgerow # id=bundle id[:alert+sync], comma separated
+      - PP_APPS=hedgerow=com.example.hedgerow # id=bundle id[:alert+sync], comma separated; Sylo: sylo=net.opland.sylo:alert
       - PP_SEAL_KEY_FILE=/run/secrets/seal.key
       - PP_HMAC_KEY_FILE=/run/secrets/hmac.key
       - PP_PUBLIC_URL=https://pigeon.example.com

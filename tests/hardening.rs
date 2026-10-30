@@ -579,7 +579,7 @@ async fn check_apns_reports_without_touching_anything() {
     let probe = "00".repeat(32);
     app.mock.script(
         &probe,
-        (0..4)
+        (0..6)
             .map(|_| Reply::reason(400, "BadDeviceToken"))
             .collect(),
     );
@@ -588,8 +588,8 @@ async fn check_apns_reports_without_touching_anything() {
         .unwrap();
     assert_eq!(
         out.matches(": ok:").count(),
-        4,
-        "two apps, two environments:\n{out}"
+        6,
+        "three apps, two environments:\n{out}"
     );
     let topics: Vec<String> = app
         .mock
@@ -599,6 +599,7 @@ async fn check_apns_reports_without_touching_anything() {
         .collect();
     assert_eq!(topics.iter().filter(|t| *t == BUNDLE).count(), 2);
     assert_eq!(topics.iter().filter(|t| *t == FERRET_BUNDLE).count(), 2);
+    assert_eq!(topics.iter().filter(|t| *t == SYLO_BUNDLE).count(), 2);
     // Nothing recorded or deleted: no devices, no usage.
     let (devices, usage) = app
         .state

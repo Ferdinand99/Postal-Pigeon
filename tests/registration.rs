@@ -126,6 +126,10 @@ async fn product_and_version_are_validated() {
         ("evil-product", "1.0"),
         ("wise-wren", "a b"),
         ("wise-wren", &"9".repeat(40)),
+        // The product list is exact: no other case, no suffix.
+        ("Sylo", "1.0"),
+        ("sylo2", "1.0"),
+        ("sylo ", "1.0"),
     ] {
         let (c, d) = app.challenge().await;
         let mut body = app.registration(&c, d);
@@ -147,6 +151,33 @@ async fn product_and_version_are_validated() {
     body.as_object_mut().unwrap().remove("version");
     let r = app.call("POST", "/v1/instances", None, Some(body)).await;
     assert_eq!(r.status, 201);
+}
+
+#[tokio::test]
+async fn every_listed_product_may_register() {
+    let app = TestApp::new().await;
+    for product in [
+        "vigilant-vole",
+        "keen-kestrel",
+        "wise-wren",
+        "faithful-ferret",
+        "sylo",
+    ] {
+        let (c, d) = app.challenge().await;
+        let mut body = app.registration(&c, d);
+        body["product"] = json!(product);
+        let ip = app.next_ip();
+        let r = app
+            .call_from(&ip, "POST", "/v1/instances", None, Some(body), None)
+            .await;
+        assert_eq!(r.status, 201, "{product}: {}", r.json);
+        assert!(
+            r.json["instance_credential"]
+                .as_str()
+                .unwrap()
+                .starts_with("hrk_")
+        );
+    }
 }
 
 #[tokio::test]

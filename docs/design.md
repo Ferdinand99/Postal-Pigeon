@@ -71,7 +71,7 @@ but the relay plays no part.
 | Actor | Who | Trusted with |
 |---|---|---|
 | **Relay operator** | The Hedgerow maintainer, who runs the official relay | The APNs key, the device-token database, and the metadata in section 14. Trusted not to read or act on content (there is none), but the design limits the damage if this trust is misplaced or the relay is compromised. |
-| **Instance** | A self-hosted server (Vigilant Vole, Keen Kestrel, Wise Wren, Faithful Ferret) run by any person | Only the handles its users gave it, and its own credential. Treated as **untrusted** by the relay: it may be buggy, misconfigured or hostile. |
+| **Instance** | A self-hosted server (Vigilant Vole, Keen Kestrel, Wise Wren, Faithful Ferret, Sylo) run by any person | Only the handles its users gave it, and its own credential. Treated as **untrusted** by the relay: it may be buggy, misconfigured or hostile. |
 | **App install** | One copy of an iOS app on one device | Its own device token and its manage key. It trusts the relay only to deliver "wake up" signals, never to tell it what to do. |
 | **Apple (APNs)** | Delivers the push | Sees the device token, the topic (bundle id), timing and the tiny payload. |
 | **Network attacker** | Anyone between parties | Nothing. All traffic is TLS. |
@@ -156,7 +156,7 @@ and can be used once (a small in-memory set remembers used challenges until they
 
 The client finds a nonce for which `SHA-256(challenge || nonce)` has at least `difficulty` leading zero bits. At 20
 bits this costs a typical server about a second and is trivial for a legitimate single registration. The `product`
-is one of a fixed list (`vigilant-vole`, `keen-kestrel`, `wise-wren`, `faithful-ferret`) and, with `version`, is
+is one of a fixed list (`vigilant-vole`, `keen-kestrel`, `wise-wren`, `faithful-ferret`, `sylo`) and, with `version`, is
 informational only: it helps the operator see which releases use the relay, and is not an identity proof.
 
 Response `201`:
@@ -219,7 +219,7 @@ rotation a single call instead of one per server.
 { "app": "hedgerow", "environment": "production", "token": "<hex device token>" }
 ```
 
-`app` must be an id configured on the relay (`hedgerow`, later `ferret`). `environment` is `production` or
+`app` must be an id configured on the relay (`hedgerow`, `sylo`, later `ferret`). `environment` is `production` or
 `sandbox` (see section 8). The token must look like an APNs token (hexadecimal, 32 to 200 bytes).
 
 Response `201`: `{ "device_id": "hrd_...", "manage_key": "hrm_..." }`.
