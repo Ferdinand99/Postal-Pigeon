@@ -80,7 +80,7 @@ def solve(challenge, difficulty):
             return str(n)
 ```
 
-`product` is one of `vigilant-vole`, `keen-kestrel`, `wise-wren`, `faithful-ferret`; `version` is optional, at most 32
+`product` is one of `vigilant-vole`, `keen-kestrel`, `wise-wren`, `faithful-ferret`, `sylo`; `version` is optional, at most 32
 characters of `A-Z a-z 0-9 . _ + -`. Both are informational.
 
 `201`:

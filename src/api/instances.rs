@@ -15,11 +15,12 @@ use crate::state::AppState;
 use crate::util::{addr_prefix, prefix_key, rfc3339};
 
 /// The products that may register (informational only; not an identity proof).
-pub const PRODUCTS: [&str; 4] = [
+pub const PRODUCTS: [&str; 5] = [
     "vigilant-vole",
     "keen-kestrel",
     "wise-wren",
     "faithful-ferret",
+    "sylo",
 ];
 
 /// `GET /v1/challenge`

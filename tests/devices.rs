@@ -29,6 +29,26 @@ async fn registration_returns_ids_and_never_the_token() {
 }
 
 #[tokio::test]
+async fn sylo_is_a_configured_app() {
+    let app = TestApp::new().await;
+    for env in ["production", "sandbox"] {
+        let ip = app.next_ip();
+        let r = app
+            .call_from(
+                &ip,
+                "POST",
+                "/v1/devices",
+                None,
+                Some(json!({ "app": "sylo", "environment": env, "token": token(0x21) })),
+                None,
+            )
+            .await;
+        assert_eq!(r.status, 201, "{env}: {}", r.json);
+        assert!(r.json["device_id"].as_str().unwrap().starts_with("hrd_"));
+    }
+}
+
+#[tokio::test]
 async fn registration_is_validated() {
     let app = TestApp::builder()
         .environments(&[Env::Production])

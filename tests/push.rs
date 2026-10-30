@@ -523,6 +523,22 @@ async fn kinds_are_allowed_per_app() {
 }
 
 #[tokio::test]
+async fn sylo_devices_get_alerts_but_not_sync() {
+    let app = TestApp::new().await;
+    let cred = app.new_instance().await;
+    let dev = app.new_device_for("sylo", "production", &token(0x66)).await;
+    let h = app.new_handle(&dev).await;
+    let r = app.push(&cred, &[&h.secret], "sync").await;
+    assert_eq!(TestApp::status_of(&r, 0), "unsupported_kind");
+    assert_eq!(app.mock.count(), 0);
+    let r = app.push(&cred, &[&h.secret], "alert").await;
+    assert_eq!(TestApp::status_of(&r, 0), "accepted");
+    assert_eq!(app.mock.count(), 1);
+    assert_eq!(app.mock.last().header("apns-topic"), SYLO_BUNDLE);
+    assert_eq!(app.mock.last().token(), token(0x66));
+}
+
+#[tokio::test]
 async fn sandbox_devices_go_to_the_sandbox_host() {
     let app = TestApp::new().await;
     let cred = app.new_instance().await;

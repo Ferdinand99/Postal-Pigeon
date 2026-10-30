@@ -103,7 +103,7 @@ Everything is an environment variable with the `PP_` prefix (or the matching fla
 | Variable | Meaning |
 |---|---|
 | `PP_APNS_KEY_PATH`, `PP_APNS_KEY_ID`, `PP_APNS_TEAM_ID` | The Apple key file, its id and the team id. All three, required. |
-| `PP_APPS` | The apps served, `id=bundle.id[:alert+sync]`, comma separated: `hedgerow=com.example.hedgerow,ferret=com.example.ferret:sync`. The bundle id is the APNs topic. Required. |
+| `PP_APPS` | The apps served, `id=bundle.id[:alert+sync]`, comma separated: `hedgerow=com.example.hedgerow,ferret=com.example.ferret:sync`. The bundle id is the APNs topic. For Sylo use `sylo=net.opland.sylo:alert`: Sylo only sends alerts, never sync. Required. |
 | `PP_APNS_ENVIRONMENT` | `production`, `sandbox` or both (the default). Devices say which they use; tokens only work in the environment that issued them. |
 | `PP_SEAL_KEY_FILE`, `PP_HMAC_KEY_FILE` | Key files (64 hex characters; make them with `postal-pigeon keygen`). Required. Keep them off the data volume. |
 | `PP_SEAL_OLD_KEY_FILES` | Older seal keys, comma separated, kept while tokens are re-sealed under the current one (rotation below). |

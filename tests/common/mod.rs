@@ -33,6 +33,7 @@ use tower::ServiceExt as _;
 
 pub const BUNDLE: &str = "tools.hedgerow.app";
 pub const FERRET_BUNDLE: &str = "tools.hedgerow.ferret";
+pub const SYLO_BUNDLE: &str = "net.opland.sylo";
 pub const KEY_ID: &str = "ABC123DEFG";
 pub const TEAM_ID: &str = "TEAM123456";
 
@@ -316,6 +317,7 @@ impl TestApp {
             apps: vec![
                 AppConfig::parse(&format!("hedgerow={BUNDLE}")).unwrap(),
                 AppConfig::parse(&format!("ferret={FERRET_BUNDLE}:sync")).unwrap(),
+                AppConfig::parse(&format!("sylo={SYLO_BUNDLE}:alert")).unwrap(),
             ],
             environments: b.environments,
             apns: Some(ApnsSettings {
