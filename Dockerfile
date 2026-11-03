@@ -61,15 +61,14 @@ LABEL org.opencontainers.image.title="Postal Pigeon" \
 RUN apk add --no-cache ca-certificates \
     && addgroup -S -g 1000 pigeon \
     && adduser -S -D -H -u 1000 -G pigeon -h /data -s /sbin/nologin pigeon \
-    && mkdir -p /data \
+    && mkdir -p /data /usr/share/doc/postal-pigeon \
     && chown pigeon:pigeon /data
 
 COPY --from=builder /usr/local/bin/postal-pigeon /usr/local/bin/postal-pigeon
 
 # The licence texts: the relay's own (AGPL-3.0) and the notices of the crates in
 # the binary (scripts/notices.sh makes the file; CI checks that it is up to date).
-COPY --chmod=644 LICENSE /usr/share/doc/postal-pigeon/LICENSE
-COPY --chmod=644 THIRD-PARTY-NOTICES /usr/share/doc/postal-pigeon/THIRD-PARTY-NOTICES
+COPY --chmod=644 LICENSE THIRD-PARTY-NOTICES /usr/share/doc/postal-pigeon/
 
 ENV PP_BIND=0.0.0.0:3010 \
     PP_DATA_DIR=/data
