@@ -181,3 +181,5 @@ Postal Pigeon is part of [Hedgerow](https://hedgerow.tools/), with [Vigilant Vol
 ## License
 
 [GNU AGPL-3.0-only](LICENSE)
+
+The licence texts of the Rust crates inside the image are in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES). The image carries the file, with the AGPL text, in `/usr/share/doc/postal-pigeon/`. `scripts/notices.sh` makes the file (cargo-about, pinned), and CI fails when it is out of date or when a dependency has a licence that is not on the allowlist in `about.toml`. After changing a dependency, run `scripts/notices.sh` and commit the result.
