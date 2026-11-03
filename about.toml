@@ -1,0 +1,64 @@
+# cargo-about configuration, used by scripts/notices.sh to make THIRD-PARTY-NOTICES (the image).
+#
+# `accepted` is the allowlist of licences for everything that is linked into the binaries. A
+# dependency with any other licence fails the notices check in CI. Postal Pigeon itself is
+# AGPL-3.0-only; its own crate (publish = false) is private and skipped.
+# Strong copyleft from other authors is not on the list.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+    "0BSD",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+]
+
+# The systems the images are built for (static musl binaries on Alpine).
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+
+# Build scripts and test code are not in the binaries.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# The project's own crate (AGPL-3.0-only, publish = false).
+private = { ignore = true }
+
+# ---------------------------------------------------------------------------------------------
+# Clarifications.
+#
+# cargo-about finds no licence text for the crates below that it recognises, and then writes the
+# bare SPDX template ("Copyright <year> <owner>"). That is not a notice, so each of these crates
+# gets the real file from inside the published crate instead. The checksum is the SHA-256 of that
+# file; when a new version of a crate changes the file, the checksum no longer matches, the
+# clarification stops working, and the notices check fails until someone looks.
+# scripts/notices.sh fails on any text that still has a placeholder.
+
+# aws-lc-sys 0.46.0: the LICENSE of the crate is the combined notice of AWS-LC (Apache-2.0, ISC,
+# MIT, BSD-3-Clause and MIT-0 texts).
+[aws-lc-sys.clarify]
+license = "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)"
+
+[[aws-lc-sys.clarify.files]]
+path = 'LICENSE'
+license = 'Apache-2.0 AND ISC AND MIT AND BSD-3-Clause AND MIT-0'
+checksum = '728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e'
+
+# aws-lc-rs 1.18.2: the LICENSE of the crate has the Apache-2.0 text and the ISC text.
+[aws-lc-rs.clarify]
+license = "ISC AND (Apache-2.0 OR ISC)"
+
+[[aws-lc-rs.clarify.files]]
+path = 'LICENSE'
+license = 'Apache-2.0 AND ISC'
+checksum = 'b50b376e7d24a0598488b730c3034ffcd0b58dd36c0913a24b9903a3cfd04bf7'

@@ -66,6 +66,11 @@ RUN apk add --no-cache ca-certificates \
 
 COPY --from=builder /usr/local/bin/postal-pigeon /usr/local/bin/postal-pigeon
 
+# The licence texts: the relay's own (AGPL-3.0) and the notices of the crates in
+# the binary (scripts/notices.sh makes the file; CI checks that it is up to date).
+COPY --chmod=644 LICENSE /usr/share/doc/postal-pigeon/LICENSE
+COPY --chmod=644 THIRD-PARTY-NOTICES /usr/share/doc/postal-pigeon/THIRD-PARTY-NOTICES
+
 ENV PP_BIND=0.0.0.0:3010 \
     PP_DATA_DIR=/data
 
